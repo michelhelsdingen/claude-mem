@@ -140,7 +140,8 @@ export class SessionManager {
       cumulativeOutputTokens: 0,
       earliestPendingTimestamp: null,
       conversationHistory: [],  // Initialize empty - will be populated by agents
-      currentProvider: null  // Will be set when generator starts
+      currentProvider: null,  // Will be set when generator starts
+      consecutiveRestarts: 0  // Track consecutive restart attempts to prevent infinite loops
     };
 
     logger.debug('SESSION', 'Creating new session object', {
@@ -368,6 +369,16 @@ export class SessionManager {
     let session = this.sessions.get(sessionDbId);
     if (!session) {
       session = this.initializeSession(sessionDbId);
+    }
+
+    // Reset AbortController if it was previously aborted
+    // This fixes the bug where a session gets stuck in an infinite "Generator aborted" loop
+    // after its AbortController was aborted (e.g., from a previous generator exit)
+    if (session.abortController.signal.aborted) {
+      logger.debug('SESSION', 'Resetting aborted AbortController before starting generator', {
+        sessionId: session.sessionDbId
+      });
+      session.abortController = new AbortController();
     }
 
     const emitter = this.sessionQueues.get(sessionDbId);
