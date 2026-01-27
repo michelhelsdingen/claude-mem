@@ -56,6 +56,16 @@ export function getWorkerBaseUrl(): string {
 }
 
 /**
+ * Check if remote mode is enabled
+ * When true, the client should connect to a remote worker instead of spawning a local one
+ */
+export function isRemoteMode(): boolean {
+  const settingsPath = path.join(SettingsDefaultsManager.get('CLAUDE_MEM_DATA_DIR'), 'settings.json');
+  const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
+  return settings.CLAUDE_MEM_REMOTE_MODE === 'true';
+}
+
+/**
  * Clear the cached port and host values
  * Call this when settings are updated to force re-reading from file
  */

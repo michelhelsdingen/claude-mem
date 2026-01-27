@@ -36,6 +36,7 @@ export interface SettingsDefaults {
   CLAUDE_CODE_PATH: string;
   CLAUDE_MEM_MODE: string;
   CLAUDE_MEM_CHROMA_DISABLED: string;  // 'true' | 'false' - disable Chroma vector search
+  CLAUDE_MEM_REMOTE_MODE: string;  // 'true' | 'false' - skip local worker spawn, connect to remote worker
   // Token Economics
   CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: string;
   CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: string;
@@ -81,6 +82,7 @@ export class SettingsDefaultsManager {
     CLAUDE_CODE_PATH: '', // Empty means auto-detect via 'which claude'
     CLAUDE_MEM_MODE: 'code', // Default mode profile
     CLAUDE_MEM_CHROMA_DISABLED: 'false',  // Chroma enabled by default
+    CLAUDE_MEM_REMOTE_MODE: 'false',  // Local mode by default
     // Token Economics
     CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: 'true',
     CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: 'true',

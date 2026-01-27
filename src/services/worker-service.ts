@@ -12,7 +12,7 @@
 import path from 'path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { getWorkerPort, getWorkerHost } from '../shared/worker-utils.js';
+import { getWorkerPort, getWorkerHost, isRemoteMode } from '../shared/worker-utils.js';
 import { logger } from '../utils/logger.js';
 
 // Version injected at build time by esbuild define
@@ -556,6 +556,21 @@ async function main() {
 
   switch (command) {
     case 'start': {
+      // Remote mode: skip local worker spawn, just verify remote worker is reachable
+      if (isRemoteMode()) {
+        logger.info('SYSTEM', 'Remote mode enabled, skipping local worker spawn', {
+          host: getWorkerHost(),
+          port
+        });
+        const remoteHealthy = await waitForHealth(port, getPlatformTimeout(15000));
+        if (remoteHealthy) {
+          logger.info('SYSTEM', 'Remote worker is healthy');
+          exitWithStatus('ready');
+        }
+        logger.error('SYSTEM', 'Remote worker not reachable', { host: getWorkerHost(), port });
+        exitWithStatus('error', `Remote worker not reachable at ${getWorkerHost()}:${port}`);
+      }
+
       if (await waitForHealth(port, 1000)) {
         const versionCheck = await checkVersionMatch(port);
         if (!versionCheck.matches) {
