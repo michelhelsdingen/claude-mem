@@ -13,7 +13,7 @@ import path from 'path';
 import { existsSync, writeFileSync, unlinkSync, statSync } from 'fs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { getWorkerPort, getWorkerHost } from '../shared/worker-utils.js';
+import { getWorkerPort, getWorkerHost, isRemoteMode } from '../shared/worker-utils.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
 import { logger } from '../utils/logger.js';
@@ -764,6 +764,12 @@ export class WorkerService {
  * @returns true if worker is healthy (existing or newly started), false on failure
  */
 async function ensureWorkerStarted(port: number): Promise<boolean> {
+  // Remote mode: skip local worker spawn, rely on remote worker
+  if (SettingsDefaultsManager.get('CLAUDE_MEM_REMOTE_MODE') === 'true') {
+    logger.info('SYSTEM', 'Remote mode enabled, skipping local worker spawn');
+    return waitForHealth(port, 5000);
+  }
+
   // Clean stale PID file first (cheap: 1 fs read + 1 signal-0 check)
   cleanStalePidFile();
 
@@ -850,6 +856,21 @@ async function main() {
 
   switch (command) {
     case 'start': {
+      // Remote mode: skip local worker spawn, just verify remote worker is reachable
+      if (isRemoteMode()) {
+        logger.info('SYSTEM', 'Remote mode enabled, skipping local worker spawn', {
+          host: getWorkerHost(),
+          port
+        });
+        const remoteHealthy = await waitForHealth(port, getPlatformTimeout(15000));
+        if (remoteHealthy) {
+          logger.info('SYSTEM', 'Remote worker is healthy');
+          exitWithStatus('ready');
+        }
+        logger.error('SYSTEM', 'Remote worker not reachable', { host: getWorkerHost(), port });
+        exitWithStatus('error', `Remote worker not reachable at ${getWorkerHost()}:${port}`);
+      }
+
       const success = await ensureWorkerStarted(port);
       if (success) {
         exitWithStatus('ready');
