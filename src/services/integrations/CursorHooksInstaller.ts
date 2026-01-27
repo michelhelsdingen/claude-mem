@@ -15,7 +15,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from '
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { logger } from '../../utils/logger.js';
-import { getWorkerPort } from '../../shared/worker-utils.js';
+import { getWorkerBaseUrl } from '../../shared/worker-utils.js';
 import {
   readCursorRegistry as readCursorRegistryFromFile,
   writeCursorRegistry as writeCursorRegistryToFile,
@@ -103,8 +103,9 @@ export async function updateCursorContextForProject(projectName: string, port: n
 
   try {
     // Fetch fresh context from worker
+    const baseUrl = getWorkerBaseUrl();
     const response = await fetch(
-      `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(projectName)}`
+      `${baseUrl}/api/context/inject?project=${encodeURIComponent(projectName)}`
     );
 
     if (!response.ok) return;
@@ -385,7 +386,6 @@ async function setupProjectContext(targetDir: string, workspaceRoot: string): Pr
   const rulesDir = path.join(targetDir, 'rules');
   mkdirSync(rulesDir, { recursive: true });
 
-  const port = getWorkerPort();
   const projectName = path.basename(workspaceRoot);
   let contextGenerated = false;
 
@@ -393,11 +393,12 @@ async function setupProjectContext(targetDir: string, workspaceRoot: string): Pr
 
   try {
     // Check if worker is running
-    const healthResponse = await fetch(`http://127.0.0.1:${port}/api/readiness`);
+    const baseUrl = getWorkerBaseUrl();
+    const healthResponse = await fetch(`${baseUrl}/api/readiness`);
     if (healthResponse.ok) {
       // Fetch context
       const contextResponse = await fetch(
-        `http://127.0.0.1:${port}/api/context/inject?project=${encodeURIComponent(projectName)}`
+        `${baseUrl}/api/context/inject?project=${encodeURIComponent(projectName)}`
       );
       if (contextResponse.ok) {
         const context = await contextResponse.text();
