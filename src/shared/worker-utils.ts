@@ -48,6 +48,14 @@ export function getWorkerHost(): string {
 }
 
 /**
+ * Get the full base URL for the worker service
+ * Convenience helper combining host and port
+ */
+export function getWorkerBaseUrl(): string {
+  return `http://${getWorkerHost()}:${getWorkerPort()}`;
+}
+
+/**
  * Clear the cached port and host values
  * Call this when settings are updated to force re-reading from file
  */
@@ -61,9 +69,10 @@ export function clearPortCache(): void {
  * Changed from /health to /api/readiness to ensure MCP initialization is complete
  */
 async function isWorkerHealthy(): Promise<boolean> {
+  const host = getWorkerHost();
   const port = getWorkerPort();
   // Note: Removed AbortSignal.timeout to avoid Windows Bun cleanup issue (libuv assertion)
-  const response = await fetch(`http://127.0.0.1:${port}/api/readiness`);
+  const response = await fetch(`http://${host}:${port}/api/readiness`);
   return response.ok;
 }
 
@@ -80,9 +89,10 @@ function getPluginVersion(): string {
  * Get the running worker's version from the API
  */
 async function getWorkerVersion(): Promise<string> {
+  const host = getWorkerHost();
   const port = getWorkerPort();
   // Note: Removed AbortSignal.timeout to avoid Windows Bun cleanup issue (libuv assertion)
-  const response = await fetch(`http://127.0.0.1:${port}/api/version`);
+  const response = await fetch(`http://${host}:${port}/api/version`);
   if (!response.ok) {
     throw new Error(`Failed to get worker version: ${response.status}`);
   }
