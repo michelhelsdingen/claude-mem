@@ -67,9 +67,24 @@ export function getProcessBySession(sessionDbId: number): TrackedProcess | undef
 }
 
 /**
- * Get the count of currently active (tracked) processes
+ * Get the count of currently active (tracked) processes.
+ * Cleans up dead processes before counting to prevent phantom pool exhaustion.
  */
 export function getActiveCount(): number {
+  for (const [pid, info] of processRegistry) {
+    // Check ChildProcess state
+    if (info.process.killed || info.process.exitCode !== null) {
+      unregisterProcess(pid);
+      continue;
+    }
+    // OS-level liveness check (signal 0 tests existence without killing)
+    try {
+      process.kill(pid, 0);
+    } catch {
+      logger.debug('PROCESS', `PID ${pid} no longer alive, cleaning up`, { pid, sessionDbId: info.sessionDbId });
+      unregisterProcess(pid);
+    }
+  }
   return processRegistry.size;
 }
 
