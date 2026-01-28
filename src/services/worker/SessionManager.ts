@@ -123,14 +123,25 @@ export class SessionManager {
       });
     }
 
+    // Log warning if we're discarding a stale memory_session_id (Issue #817)
+    if (dbSession.memory_session_id) {
+      logger.warn('SESSION', `Discarding stale memory_session_id from previous worker instance (Issue #817)`, {
+        sessionDbId,
+        staleMemorySessionId: dbSession.memory_session_id,
+        reason: 'SDK context lost on worker restart - will capture new ID'
+      });
+    }
+
     // Create active session
-    // Load memorySessionId from database if previously captured (enables resume across restarts)
-    // BUT don't load if status is 'failed' - that means the SDK couldn't resume and we should start fresh
-    const shouldUseMemoryId = dbSession.memory_session_id && dbSession.status !== 'failed';
+    // CRITICAL: Do NOT load memorySessionId from database here (Issue #817)
+    // When creating a new in-memory session, any database memory_session_id is STALE
+    // because the SDK context was lost when the worker restarted. The SDK agent will
+    // capture a new memorySessionId on the first response and persist it.
+    // Loading stale memory_session_id causes "No conversation found" crashes on resume.
     session = {
       sessionDbId,
       contentSessionId: dbSession.content_session_id,
-      memorySessionId: shouldUseMemoryId ? dbSession.memory_session_id : null,
+      memorySessionId: null,  // Always start fresh - SDK will capture new ID
       project: dbSession.project,
       userPrompt,
       pendingMessages: [],
@@ -146,11 +157,11 @@ export class SessionManager {
       consecutiveRestarts: 0  // Track consecutive restart attempts to prevent infinite loops
     };
 
-    logger.debug('SESSION', 'Creating new session object', {
+    logger.debug('SESSION', 'Creating new session object (memorySessionId cleared to prevent stale resume)', {
       sessionDbId,
       contentSessionId: dbSession.content_session_id,
-      memorySessionId: shouldUseMemoryId ? dbSession.memory_session_id : '(none - fresh session or failed status)',
-      dbStatus: dbSession.status,
+      dbMemorySessionId: dbSession.memory_session_id || '(none in DB)',
+      memorySessionId: '(cleared - will capture fresh from SDK)',
       lastPromptNumber: promptNumber || this.dbManager.getSessionStore().getPromptNumberFromUserPrompts(dbSession.content_session_id)
     });
 
