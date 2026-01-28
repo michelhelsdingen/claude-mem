@@ -125,6 +125,12 @@ export class SessionRoutes extends BaseRouteHandler {
     const agent = provider === 'openrouter' ? this.openRouterAgent : (provider === 'gemini' ? this.geminiAgent : this.sdkAgent);
     const agentName = provider === 'openrouter' ? 'OpenRouter' : (provider === 'gemini' ? 'Gemini' : 'Claude SDK');
 
+    // Ensure fresh abort controller before starting generator
+    // Previous generator may have left it in aborted state (natural completion path)
+    if (session.abortController.signal.aborted) {
+      session.abortController = new AbortController();
+    }
+
     logger.info('SESSION', `Generator auto-starting (${source}) using ${agentName}`, {
       sessionId: session.sessionDbId,
       queueDepth: session.pendingMessages.length,
