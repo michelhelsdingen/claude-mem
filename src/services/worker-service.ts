@@ -402,6 +402,49 @@ export class WorkerService {
         logger.info('SYSTEM', 'Started chroma watchdog (runs every 5 minutes)');
       }
 
+      // Stale session watchdog: periodically clear stuck memory_session_ids
+      const STALE_SESSION_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+      const staleSessionWatchdog = setInterval(() => {
+        try {
+          const db = this.dbManager.getSessionStore().db;
+
+          // Clear memory_session_id from failed sessions
+          const failedResult = db.prepare(`
+            UPDATE sdk_sessions
+            SET memory_session_id = NULL
+            WHERE status = 'failed' AND memory_session_id IS NOT NULL
+          `).run();
+
+          if (failedResult.changes > 0) {
+            logger.info('SYSTEM', `Stale session watchdog: cleared ${failedResult.changes} failed sessions with stale memory_session_id`);
+          }
+
+          // Clear memory_session_id from sessions inactive for 30+ minutes
+          // (no observations in last 30 min but still marked active with memory_session_id)
+          const staleThreshold = Date.now() - (30 * 60 * 1000);
+          const staleResult = db.prepare(`
+            UPDATE sdk_sessions
+            SET memory_session_id = NULL
+            WHERE status = 'active'
+              AND memory_session_id IS NOT NULL
+              AND id NOT IN (
+                SELECT DISTINCT s.id FROM sdk_sessions s
+                JOIN observations o ON o.sdk_session_id = s.content_session_id
+                WHERE o.created_at_epoch > ?
+              )
+              AND started_at_epoch < ?
+          `).run(staleThreshold, staleThreshold);
+
+          if (staleResult.changes > 0) {
+            logger.info('SYSTEM', `Stale session watchdog: cleared ${staleResult.changes} inactive sessions (no activity for 30+ min)`);
+          }
+        } catch (error) {
+          logger.error('SYSTEM', 'Stale session watchdog error', {}, error as Error);
+        }
+      }, STALE_SESSION_CHECK_INTERVAL_MS);
+      staleSessionWatchdog.unref();
+      logger.info('SYSTEM', 'Started stale session watchdog (runs every 5 minutes)');
+
       // Auto-recover orphaned queues (fire-and-forget with error logging)
       this.processPendingQueues(50).then(result => {
         if (result.sessionsStarted > 0) {
