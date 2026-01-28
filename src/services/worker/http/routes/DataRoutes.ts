@@ -10,8 +10,9 @@ import path from 'path';
 import { readFileSync, statSync, existsSync } from 'fs';
 import { logger } from '../../../../utils/logger.js';
 import { homedir } from 'os';
-import { getPackageRoot } from '../../../../shared/paths.js';
+import { getPackageRoot, USER_SETTINGS_PATH } from '../../../../shared/paths.js';
 import { getWorkerPort } from '../../../../shared/worker-utils.js';
+import { SettingsDefaultsManager } from '../../../../shared/SettingsDefaultsManager.js';
 import { PaginationHelper } from '../../PaginationHelper.js';
 import { DatabaseManager } from '../../DatabaseManager.js';
 import { SessionManager } from '../../SessionManager.js';
@@ -489,7 +490,9 @@ export class DataRoutes extends BaseRouteHandler {
   private handleGetProcesses = this.wrapHandler((req: Request, res: Response): void => {
     const processes = getActiveProcesses();
     const activeCount = getActiveCount();
-    const maxConcurrent = 2; // From SDKAgent MAX_CONCURRENT_AGENTS
+    // Read max concurrent from settings (default: 8)
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    const maxConcurrent = parseInt(settings.CLAUDE_MEM_MAX_CONCURRENT_AGENTS, 10) || 8;
 
     res.json({
       processes,

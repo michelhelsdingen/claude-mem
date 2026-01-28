@@ -97,6 +97,7 @@ export class DatabaseManager {
     memory_session_id: string | null;
     project: string;
     user_prompt: string;
+    status: string | null;
   } {
     const session = this.getSessionStore().getSessionById(sessionDbId);
     if (!session) {

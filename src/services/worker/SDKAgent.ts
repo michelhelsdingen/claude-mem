@@ -45,19 +45,21 @@ export class SDKAgent {
    */
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     // Enforce subprocess pool limit to prevent resource exhaustion
-    const MAX_CONCURRENT_AGENTS = 2;
+    // Configurable via CLAUDE_MEM_MAX_CONCURRENT_AGENTS setting (default: 8)
+    const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+    const maxConcurrentAgents = parseInt(settings.CLAUDE_MEM_MAX_CONCURRENT_AGENTS, 10) || 8;
 
     const activeCount = getActiveCount();
-    if (activeCount >= MAX_CONCURRENT_AGENTS) {
-      logger.warn('AGENT', `Pool limit reached (${activeCount}/${MAX_CONCURRENT_AGENTS}), waiting...`, {
+    if (activeCount >= maxConcurrentAgents) {
+      logger.warn('AGENT', `Pool limit reached (${activeCount}/${maxConcurrentAgents}), waiting...`, {
         sessionDbId: session.sessionDbId
       });
       // Wait for a slot to free up (max 60s)
       for (let i = 0; i < 120; i++) {
         await new Promise(r => setTimeout(r, 500));
-        if (getActiveCount() < MAX_CONCURRENT_AGENTS) break;
+        if (getActiveCount() < maxConcurrentAgents) break;
       }
-      if (getActiveCount() >= MAX_CONCURRENT_AGENTS) {
+      if (getActiveCount() >= maxConcurrentAgents) {
         throw new Error('Agent pool timeout: too many concurrent subprocesses');
       }
     }
@@ -144,26 +146,42 @@ export class SDKAgent {
       // Capture memory session ID from first SDK message (any type has session_id)
       // This enables resume for subsequent generator starts within the same user session
       if (!session.memorySessionId && message.session_id) {
-        session.memorySessionId = message.session_id;
-        // Persist to database for cross-restart recovery
-        this.dbManager.getSessionStore().updateMemorySessionId(
+        // Try to persist to database for cross-restart recovery
+        // This only works if memory_session_id is NULL (no existing observations)
+        const updated = this.dbManager.getSessionStore().updateMemorySessionId(
           session.sessionDbId,
           message.session_id
         );
-        // Verify the update by reading back from DB
-        const verification = this.dbManager.getSessionStore().getSessionById(session.sessionDbId);
-        const dbVerified = verification?.memory_session_id === message.session_id;
-        logger.info('SESSION', `MEMORY_ID_CAPTURED | sessionDbId=${session.sessionDbId} | memorySessionId=${message.session_id} | dbVerified=${dbVerified}`, {
-          sessionId: session.sessionDbId,
-          memorySessionId: message.session_id
-        });
-        if (!dbVerified) {
-          logger.error('SESSION', `MEMORY_ID_MISMATCH | sessionDbId=${session.sessionDbId} | expected=${message.session_id} | got=${verification?.memory_session_id}`, {
-            sessionId: session.sessionDbId
+
+        if (updated) {
+          // Successfully updated DB - use this ID for storage
+          session.memorySessionId = message.session_id;
+          logger.info('SESSION', `MEMORY_ID_CAPTURED | sessionDbId=${session.sessionDbId} | memorySessionId=${message.session_id}`, {
+            sessionId: session.sessionDbId,
+            memorySessionId: message.session_id
           });
+        } else {
+          // DB already has a memory_session_id - use that instead
+          // This happens when the SDK session was interrupted and restarted
+          const dbSession = this.dbManager.getSessionStore().getSessionById(session.sessionDbId);
+          if (dbSession?.memory_session_id) {
+            session.memorySessionId = dbSession.memory_session_id;
+            logger.info('SESSION', `MEMORY_ID_REUSED | sessionDbId=${session.sessionDbId} | sdkId=${message.session_id} | dbId=${dbSession.memory_session_id}`, {
+              sessionId: session.sessionDbId,
+              sdkId: message.session_id,
+              dbId: dbSession.memory_session_id
+            });
+          } else {
+            // DB has no memory_session_id but update failed - something weird happened
+            logger.warn('SESSION', `MEMORY_ID_UPDATE_FAILED | sessionDbId=${session.sessionDbId} | memorySessionId=${message.session_id} | reason=unknown`, {
+              sessionId: session.sessionDbId,
+              memorySessionId: message.session_id
+            });
+            // Use the SDK session_id anyway for in-memory processing
+            // Storage will fail later but at least we captured the response
+            session.memorySessionId = message.session_id;
+          }
         }
-        // Debug-level alignment log for detailed tracing
-        logger.debug('SDK', `[ALIGNMENT] Captured | contentSessionId=${session.contentSessionId} → memorySessionId=${message.session_id} | Future prompts will resume with this ID`);
       }
 
       // Handle assistant messages

@@ -53,6 +53,8 @@ export interface SettingsDefaults {
   // Feature Toggles
   CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: string;
   CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: string;
+  // Agent Pool Configuration
+  CLAUDE_MEM_MAX_CONCURRENT_AGENTS: string;
 }
 
 export class SettingsDefaultsManager {
@@ -100,6 +102,8 @@ export class SettingsDefaultsManager {
     // Feature Toggles
     CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: 'true',
     CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: 'false',
+    // Agent Pool Configuration
+    CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '8',
   };
 
   /**

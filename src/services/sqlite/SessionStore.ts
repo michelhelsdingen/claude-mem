@@ -648,13 +648,23 @@ export class SessionStore {
   /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
+   *
+   * CRITICAL: Only updates if memory_session_id is NULL to avoid FK constraint errors.
+   * If there's an existing memory_session_id with observations, we can't change it
+   * because the FK constraint would orphan those observations.
+   *
+   * Returns true if update was successful, false if skipped due to existing value.
    */
-  updateMemorySessionId(sessionDbId: number, memorySessionId: string): void {
-    this.db.prepare(`
+  updateMemorySessionId(sessionDbId: number, memorySessionId: string): boolean {
+    // Only update if memory_session_id is currently NULL
+    // This prevents FK errors when observations reference the old value
+    const result = this.db.prepare(`
       UPDATE sdk_sessions
       SET memory_session_id = ?
-      WHERE id = ?
+      WHERE id = ? AND memory_session_id IS NULL
     `).run(memorySessionId, sessionDbId);
+
+    return result.changes > 0;
   }
 
   /**
@@ -1078,9 +1088,10 @@ export class SessionStore {
     memory_session_id: string | null;
     project: string;
     user_prompt: string;
+    status: string | null;
   } | null {
     const stmt = this.db.prepare(`
-      SELECT id, content_session_id, memory_session_id, project, user_prompt
+      SELECT id, content_session_id, memory_session_id, project, user_prompt, status
       FROM sdk_sessions
       WHERE id = ?
       LIMIT 1

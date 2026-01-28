@@ -125,10 +125,12 @@ export class SessionManager {
 
     // Create active session
     // Load memorySessionId from database if previously captured (enables resume across restarts)
+    // BUT don't load if status is 'failed' - that means the SDK couldn't resume and we should start fresh
+    const shouldUseMemoryId = dbSession.memory_session_id && dbSession.status !== 'failed';
     session = {
       sessionDbId,
       contentSessionId: dbSession.content_session_id,
-      memorySessionId: dbSession.memory_session_id || null,
+      memorySessionId: shouldUseMemoryId ? dbSession.memory_session_id : null,
       project: dbSession.project,
       userPrompt,
       pendingMessages: [],
@@ -147,7 +149,8 @@ export class SessionManager {
     logger.debug('SESSION', 'Creating new session object', {
       sessionDbId,
       contentSessionId: dbSession.content_session_id,
-      memorySessionId: dbSession.memory_session_id || '(none - fresh session)',
+      memorySessionId: shouldUseMemoryId ? dbSession.memory_session_id : '(none - fresh session or failed status)',
+      dbStatus: dbSession.status,
       lastPromptNumber: promptNumber || this.dbManager.getSessionStore().getPromptNumberFromUserPrompts(dbSession.content_session_id)
     });
 

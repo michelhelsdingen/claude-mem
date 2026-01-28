@@ -156,16 +156,19 @@ export class SessionRoutes extends BaseRouteHandler {
           error: error.message
         }, error);
 
-        // CRITICAL: Clear stale memory_session_id on "exit code 1" errors
+        // CRITICAL: Clear stale memory_session_id on SDK failures
         // This prevents infinite restart loops when SDK context is lost
-        if (error.message?.includes('exited with code 1')) {
-          logger.warn('SESSION', `Clearing stale memory_session_id after exit code 1`, {
+        const isExitCode1 = error.message?.includes('exited with code 1');
+        const isFKError = error.message?.includes('FOREIGN KEY constraint failed');
+        if (isExitCode1 || isFKError) {
+          logger.warn('SESSION', `Clearing stale memory_session_id after ${isExitCode1 ? 'exit code 1' : 'FK constraint error'}`, {
             sessionId: session.sessionDbId,
-            staleId: session.memorySessionId
+            staleId: session.memorySessionId,
+            errorType: isExitCode1 ? 'exit_code_1' : 'fk_constraint'
           });
           // Clear in-memory (used by generator)
           session.memorySessionId = undefined;
-          // Mark session as failed (observations FK prevents clearing memory_session_id)
+          // Mark session as failed so next attempt starts fresh
           try {
             const db = this.workerService.dbManager.getSessionStore().db;
             db.prepare(`UPDATE sdk_sessions SET status = 'failed' WHERE id = ?`).run(session.sessionDbId);

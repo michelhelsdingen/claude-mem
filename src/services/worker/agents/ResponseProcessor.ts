@@ -70,8 +70,25 @@ export async function processAgentResponse(
   const sessionStore = dbManager.getSessionStore();
 
   // CRITICAL: Must use memorySessionId (not contentSessionId) for FK constraint
+  // If memorySessionId is not yet captured, skip storage (SDK will provide it on next message)
   if (!session.memorySessionId) {
-    throw new Error('Cannot store observations: memorySessionId not yet captured');
+    logger.warn('DB', `SKIP_STORAGE | sessionDbId=${session.sessionDbId} | reason=memorySessionId not yet captured (timing issue) | obsCount=${observations.length}`, {
+      sessionId: session.sessionDbId,
+      hasObservations: observations.length > 0,
+      hasSummary: !!summaryForStore
+    });
+    return; // Skip this storage attempt - observations will be captured on next response
+  }
+
+  // Verify memorySessionId exists in database before attempting storage
+  const dbSession = dbManager.getSessionStore().getSessionById(session.sessionDbId);
+  if (dbSession.memory_session_id !== session.memorySessionId) {
+    logger.error('DB', `SKIP_STORAGE | sessionDbId=${session.sessionDbId} | reason=memorySessionId mismatch (in-memory vs DB) | inMemory=${session.memorySessionId} | inDB=${dbSession.memory_session_id}`, {
+      sessionId: session.sessionDbId,
+      inMemoryId: session.memorySessionId,
+      dbId: dbSession.memory_session_id
+    });
+    return; // Skip - FK constraint would fail
   }
 
   // Log pre-storage with session ID chain for verification
