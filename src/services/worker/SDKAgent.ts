@@ -26,6 +26,10 @@ import { createPidCapturingSpawn, getProcessBySession, ensureProcessExit, getAct
 // @ts-ignore - Agent SDK types may not be available
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+// Maximum conversation history entries to keep (prevents "Prompt is too long" errors)
+// Haiku has smaller context than Opus/Sonnet, so we keep this conservative
+const MAX_HISTORY_LENGTH = 20;
+
 export class SDKAgent {
   private dbManager: DatabaseManager;
   private sessionManager: SessionManager;
@@ -297,8 +301,8 @@ export class SDKAgent {
       ? buildInitPrompt(session.project, session.contentSessionId, session.userPrompt, mode)
       : buildContinuationPrompt(session.userPrompt, session.lastPromptNumber, session.contentSessionId, mode);
 
-    // Add to shared conversation history for provider interop
-    session.conversationHistory.push({ role: 'user', content: initPrompt });
+    // Add to shared conversation history for provider interop (with truncation)
+    this.addToHistory(session, { role: 'user', content: initPrompt });
 
     // Yield initial user prompt with context (or continuation if prompt #2+)
     // CRITICAL: Both paths use session.contentSessionId from the hook
@@ -335,8 +339,8 @@ export class SDKAgent {
           cwd: message.cwd
         });
 
-        // Add to shared conversation history for provider interop
-        session.conversationHistory.push({ role: 'user', content: obsPrompt });
+        // Add to shared conversation history for provider interop (with truncation)
+        this.addToHistory(session, { role: 'user', content: obsPrompt });
 
         yield {
           type: 'user',
@@ -357,8 +361,8 @@ export class SDKAgent {
           last_assistant_message: message.last_assistant_message || ''
         }, mode);
 
-        // Add to shared conversation history for provider interop
-        session.conversationHistory.push({ role: 'user', content: summaryPrompt });
+        // Add to shared conversation history for provider interop (with truncation)
+        this.addToHistory(session, { role: 'user', content: summaryPrompt });
 
         yield {
           type: 'user',
@@ -371,6 +375,30 @@ export class SDKAgent {
           isSynthetic: true
         };
       }
+    }
+  }
+
+  // ============================================================================
+  // History Management
+  // ============================================================================
+
+  /**
+   * Add message to conversation history with sliding window truncation.
+   * Keeps only the most recent MAX_HISTORY_LENGTH messages to prevent
+   * "Prompt is too long" errors for long-running sessions.
+   */
+  private addToHistory(session: ActiveSession, message: { role: string; content: string }): void {
+    session.conversationHistory.push(message);
+
+    // Truncate from beginning if we exceed max length (keep most recent)
+    if (session.conversationHistory.length > MAX_HISTORY_LENGTH) {
+      const removed = session.conversationHistory.length - MAX_HISTORY_LENGTH;
+      session.conversationHistory = session.conversationHistory.slice(-MAX_HISTORY_LENGTH);
+      logger.debug('SDK', `Truncated conversation history`, {
+        sessionDbId: session.sessionDbId,
+        removed,
+        remaining: session.conversationHistory.length
+      });
     }
   }
 
