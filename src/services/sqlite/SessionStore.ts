@@ -1423,6 +1423,20 @@ export class SessionStore {
   }
 
   /**
+   * Check if a prompt with the same text was recently saved for this session.
+   * Used to deduplicate when hooks fire multiple times for the same prompt.
+   */
+  findRecentPrompt(contentSessionId: string, promptText: string, windowMs: number = 10000): { prompt_number: number } | null {
+    const cutoff = Date.now() - windowMs;
+    const stmt = this.db.prepare(`
+      SELECT prompt_number FROM user_prompts
+      WHERE content_session_id = ? AND prompt_text = ? AND created_at_epoch > ?
+      ORDER BY id DESC LIMIT 1
+    `);
+    return (stmt.get(contentSessionId, promptText, cutoff) as { prompt_number: number } | undefined) ?? null;
+  }
+
+  /**
    * Get user prompt by session ID and prompt number
    * Returns the prompt text, or null if not found
    */
