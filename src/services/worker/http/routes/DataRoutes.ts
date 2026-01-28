@@ -18,6 +18,7 @@ import { SessionManager } from '../../SessionManager.js';
 import { SSEBroadcaster } from '../../SSEBroadcaster.js';
 import type { WorkerService } from '../../../worker-service.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
+import { getActiveProcesses, getActiveCount } from '../../ProcessRegistry.js';
 
 export class DataRoutes extends BaseRouteHandler {
   constructor(
@@ -57,6 +58,11 @@ export class DataRoutes extends BaseRouteHandler {
     app.post('/api/pending-queue/process', this.handleProcessPendingQueue.bind(this));
     app.delete('/api/pending-queue/failed', this.handleClearFailedQueue.bind(this));
     app.delete('/api/pending-queue/all', this.handleClearAllQueue.bind(this));
+
+    // System status endpoints (for UI status bar)
+    app.get('/api/sessions/active', this.handleGetActiveSessions.bind(this));
+    app.get('/api/processes', this.handleGetProcesses.bind(this));
+    app.post('/api/worker/restart', this.handleWorkerRestart.bind(this));
 
     // Import endpoint
     app.post('/api/import', this.handleImport.bind(this));
@@ -462,5 +468,52 @@ export class DataRoutes extends BaseRouteHandler {
       success: true,
       clearedCount
     });
+  });
+
+  /**
+   * Get active sessions with details (for UI status bar)
+   * GET /api/sessions/active
+   */
+  private handleGetActiveSessions = this.wrapHandler((req: Request, res: Response): void => {
+    const sessions = this.sessionManager.getActiveSessions();
+    res.json({
+      sessions,
+      count: sessions.length
+    });
+  });
+
+  /**
+   * Get process pool status (for UI status bar)
+   * GET /api/processes
+   */
+  private handleGetProcesses = this.wrapHandler((req: Request, res: Response): void => {
+    const processes = getActiveProcesses();
+    const activeCount = getActiveCount();
+    const maxConcurrent = 2; // From SDKAgent MAX_CONCURRENT_AGENTS
+
+    res.json({
+      processes,
+      activeCount,
+      maxConcurrent,
+      poolUsage: `${activeCount}/${maxConcurrent}`
+    });
+  });
+
+  /**
+   * Restart the worker service
+   * POST /api/worker/restart
+   */
+  private handleWorkerRestart = this.wrapHandler((req: Request, res: Response): void => {
+    logger.warn('SYSTEM', 'Worker restart requested via API');
+
+    res.json({
+      success: true,
+      message: 'Worker will restart in 1 second'
+    });
+
+    // Delay restart to allow response to be sent
+    setTimeout(() => {
+      process.exit(0); // Daemon mode will restart automatically
+    }, 1000);
   });
 }
