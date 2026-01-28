@@ -47,6 +47,7 @@ export const sessionInitHandler: EventHandler = {
       promptNumber: number;
       skipped?: boolean;
       reason?: string;
+      deduplicated?: boolean;
     };
     const sessionDbId = initResult.sessionDbId;
     const promptNumber = initResult.promptNumber;
@@ -59,6 +60,14 @@ export const sessionInitHandler: EventHandler = {
     // Check if prompt was entirely private (worker performs privacy check)
     if (initResult.skipped && initResult.reason === 'private') {
       logger.info('HOOK', `INIT_COMPLETE | sessionDbId=${sessionDbId} | promptNumber=${promptNumber} | skipped=true | reason=private`, {
+        sessionId: sessionDbId
+      });
+      return { continue: true, suppressOutput: true };
+    }
+
+    // Skip SDK agent init if this was a deduplicated prompt (hook fired multiple times)
+    if (initResult.deduplicated) {
+      logger.info('HOOK', `INIT_COMPLETE | sessionDbId=${sessionDbId} | promptNumber=${promptNumber} | deduplicated=true`, {
         sessionId: sessionDbId
       });
       return { continue: true, suppressOutput: true };

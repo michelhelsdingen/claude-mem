@@ -601,7 +601,23 @@ export class SessionRoutes extends BaseRouteHandler {
       return;
     }
 
-    // Step 5: Save cleaned user prompt
+    // Step 5: Deduplicate - hook may fire multiple times for the same prompt
+    const recentDup = store.findRecentPrompt(contentSessionId, cleanedPrompt);
+    if (recentDup) {
+      logger.debug('SESSION', `Duplicate prompt detected (prompt#${recentDup.prompt_number}), skipping save`, {
+        sessionId: sessionDbId,
+        promptNumber: recentDup.prompt_number
+      });
+      res.json({
+        sessionDbId,
+        promptNumber: recentDup.prompt_number,
+        skipped: false,
+        deduplicated: true
+      });
+      return;
+    }
+
+    // Step 6: Save cleaned user prompt
     store.saveUserPrompt(contentSessionId, promptNumber, cleanedPrompt);
 
     // Debug-level log since CREATED already logged the key info
