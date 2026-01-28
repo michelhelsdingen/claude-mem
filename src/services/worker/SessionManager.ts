@@ -327,6 +327,30 @@ export class SessionManager {
   }
 
   /**
+   * Get active sessions with details (for UI status display)
+   */
+  getActiveSessions(): Array<{
+    sessionDbId: number;
+    project: string;
+    startTime: number;
+    ageMs: number;
+    queueDepth: number;
+    hasGenerator: boolean;
+    currentProvider: string | null;
+  }> {
+    const now = Date.now();
+    return Array.from(this.sessions.values()).map(session => ({
+      sessionDbId: session.sessionDbId,
+      project: session.project,
+      startTime: session.startTime,
+      ageMs: now - session.startTime,
+      queueDepth: this.getPendingStore().getPendingCount(session.sessionDbId),
+      hasGenerator: session.generatorPromise !== null,
+      currentProvider: session.currentProvider
+    }));
+  }
+
+  /**
    * Get total queue depth across all sessions (for activity indicator)
    */
   getTotalQueueDepth(): number {

@@ -2,6 +2,7 @@ import React from 'react';
 import { ThemeToggle } from './ThemeToggle';
 import { ThemePreference } from '../hooks/useTheme';
 import { GitHubStarsButton } from './GitHubStarsButton';
+import { StatusBar } from './StatusBar';
 import { useSpinningFavicon } from '../hooks/useSpinningFavicon';
 
 interface HeaderProps {
@@ -31,17 +32,20 @@ export function Header({
 
   return (
     <div className="header">
-      <h1>
-        <div style={{ position: 'relative', display: 'inline-block' }}>
-          <img src="claude-mem-logomark.webp" alt="" className={`logomark ${isProcessing ? 'spinning' : ''}`} />
-          {queueDepth > 0 && (
-            <div className="queue-bubble">
-              {queueDepth}
-            </div>
-          )}
-        </div>
-        <span className="logo-text">claude-mem</span>
-      </h1>
+      <div className="header-left">
+        <h1>
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <img src="claude-mem-logomark.webp" alt="" className={`logomark ${isProcessing ? 'spinning' : ''}`} />
+            {queueDepth > 0 && (
+              <div className="queue-bubble">
+                {queueDepth}
+              </div>
+            )}
+          </div>
+          <span className="logo-text">claude-mem</span>
+        </h1>
+        <StatusBar />
+      </div>
       <div className="status">
         <a
           href="https://docs.claude-mem.ai"
