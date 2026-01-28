@@ -306,6 +306,44 @@ export class WorkerService {
         logger.warn('SYSTEM', 'Failed to recover stale sessions', {}, error as Error);
       }
 
+      // Handle stale sessions with memory_session_id from previous worker instance
+      // SDK context is lost on worker restart, so resuming with old IDs causes exit code 1
+      try {
+        const db2 = this.dbManager.getSessionStore().db;
+
+        // Sessions WITH observations: mark as completed (data is preserved, no restart needed)
+        const completeResult = db2.prepare(`
+          UPDATE sdk_sessions
+          SET status = 'completed', completed_at = ?, completed_at_epoch = ?
+          WHERE status = 'active'
+            AND memory_session_id IS NOT NULL
+            AND memory_session_id IN (SELECT DISTINCT memory_session_id FROM observations)
+        `).run(new Date().toISOString(), Date.now());
+
+        if (completeResult.changes > 0) {
+          logger.info('SYSTEM', `Marked ${completeResult.changes} sessions with observations as completed`, {
+            action: 'stale_session_complete'
+          });
+        }
+
+        // Sessions WITHOUT observations: clear memory_session_id for fresh start
+        const clearResult = db2.prepare(`
+          UPDATE sdk_sessions
+          SET memory_session_id = NULL
+          WHERE status = 'active'
+            AND memory_session_id IS NOT NULL
+            AND memory_session_id NOT IN (SELECT DISTINCT memory_session_id FROM observations)
+        `).run();
+
+        if (clearResult.changes > 0) {
+          logger.info('SYSTEM', `Cleared stale memory_session_id from ${clearResult.changes} active sessions`, {
+            action: 'stale_memory_id_cleanup'
+          });
+        }
+      } catch (error) {
+        logger.warn('SYSTEM', 'Failed to handle stale sessions', {}, error as Error);
+      }
+
       // Recover stuck messages from previous crashes
       const { PendingMessageStore } = await import('./sqlite/PendingMessageStore.js');
       const pendingStore = new PendingMessageStore(this.dbManager.getSessionStore().db, 3);
