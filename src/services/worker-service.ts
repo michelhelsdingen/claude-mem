@@ -306,23 +306,25 @@ export class WorkerService {
         logger.warn('SYSTEM', 'Failed to recover stale sessions', {}, error as Error);
       }
 
-      // Clear ALL memory_session_ids on startup - SDK context is always lost on worker restart
-      // Trying to resume with stale IDs causes "Claude Code process exited with code 1"
+      // Mark all active sessions with memory_session_id as 'completed' on startup
+      // SDK context is lost on worker restart, can't resume these sessions
+      // We don't clear memory_session_id because observations reference it (FK constraint)
       try {
         const db2 = this.dbManager.getSessionStore().db;
-        const clearResult = db2.prepare(`
+        const now = new Date().toISOString();
+        const completeResult = db2.prepare(`
           UPDATE sdk_sessions
-          SET memory_session_id = NULL
-          WHERE memory_session_id IS NOT NULL
-        `).run();
+          SET status = 'completed', completed_at = ?, completed_at_epoch = ?
+          WHERE status = 'active' AND memory_session_id IS NOT NULL
+        `).run(now, Date.now());
 
-        if (clearResult.changes > 0) {
-          logger.info('SYSTEM', `Cleared ${clearResult.changes} stale memory_session_ids (SDK context lost on restart)`, {
-            action: 'startup_memory_id_cleanup'
+        if (completeResult.changes > 0) {
+          logger.info('SYSTEM', `Marked ${completeResult.changes} stale sessions as completed (SDK context lost on restart)`, {
+            action: 'startup_session_cleanup'
           });
         }
       } catch (error) {
-        logger.warn('SYSTEM', 'Failed to clear stale memory_session_ids', {}, error as Error);
+        logger.warn('SYSTEM', 'Failed to mark stale sessions as completed', {}, error as Error);
       }
 
       // Recover stuck messages from previous crashes
@@ -402,41 +404,32 @@ export class WorkerService {
         logger.info('SYSTEM', 'Started chroma watchdog (runs every 5 minutes)');
       }
 
-      // Stale session watchdog: periodically clear stuck memory_session_ids
+      // Stale session watchdog: periodically mark stuck sessions as completed
+      // We don't clear memory_session_id because observations reference it (FK constraint)
       const STALE_SESSION_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
       const staleSessionWatchdog = setInterval(() => {
         try {
           const db = this.dbManager.getSessionStore().db;
+          const now = new Date().toISOString();
+          const nowEpoch = Date.now();
 
-          // Clear memory_session_id from failed sessions
-          const failedResult = db.prepare(`
-            UPDATE sdk_sessions
-            SET memory_session_id = NULL
-            WHERE status = 'failed' AND memory_session_id IS NOT NULL
-          `).run();
-
-          if (failedResult.changes > 0) {
-            logger.info('SYSTEM', `Stale session watchdog: cleared ${failedResult.changes} failed sessions with stale memory_session_id`);
-          }
-
-          // Clear memory_session_id from sessions inactive for 30+ minutes
-          // (no observations in last 30 min but still marked active with memory_session_id)
-          const staleThreshold = Date.now() - (30 * 60 * 1000);
+          // Mark inactive sessions as completed (no observations for 30+ min)
+          const staleThreshold = nowEpoch - (30 * 60 * 1000);
           const staleResult = db.prepare(`
             UPDATE sdk_sessions
-            SET memory_session_id = NULL
+            SET status = 'completed', completed_at = ?, completed_at_epoch = ?
             WHERE status = 'active'
               AND memory_session_id IS NOT NULL
               AND id NOT IN (
                 SELECT DISTINCT s.id FROM sdk_sessions s
-                JOIN observations o ON o.sdk_session_id = s.content_session_id
+                JOIN observations o ON o.memory_session_id = s.memory_session_id
                 WHERE o.created_at_epoch > ?
               )
               AND started_at_epoch < ?
-          `).run(staleThreshold, staleThreshold);
+          `).run(now, nowEpoch, staleThreshold, staleThreshold);
 
           if (staleResult.changes > 0) {
-            logger.info('SYSTEM', `Stale session watchdog: cleared ${staleResult.changes} inactive sessions (no activity for 30+ min)`);
+            logger.info('SYSTEM', `Stale session watchdog: marked ${staleResult.changes} inactive sessions as completed (no activity for 30+ min)`);
           }
         } catch (error) {
           logger.error('SYSTEM', 'Stale session watchdog error', {}, error as Error);

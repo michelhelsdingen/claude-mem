@@ -163,13 +163,14 @@ export class SessionRoutes extends BaseRouteHandler {
             sessionId: session.sessionDbId,
             staleId: session.memorySessionId
           });
+          // Clear in-memory (used by generator)
           session.memorySessionId = undefined;
-          // Also clear in database
+          // Mark session as failed (observations FK prevents clearing memory_session_id)
           try {
-            const dbManager = this.workerService.dbManager;
-            dbManager.getSessionStore().updateMemorySessionId(session.sessionDbId, null);
+            const db = this.workerService.dbManager.getSessionStore().db;
+            db.prepare(`UPDATE sdk_sessions SET status = 'failed' WHERE id = ?`).run(session.sessionDbId);
           } catch (dbError) {
-            logger.error('SESSION', 'Failed to clear stale memory_session_id in DB', {
+            logger.error('SESSION', 'Failed to mark session as failed', {
               sessionId: session.sessionDbId
             }, dbError as Error);
           }
