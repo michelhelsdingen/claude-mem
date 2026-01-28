@@ -140,16 +140,40 @@ export class SessionRoutes extends BaseRouteHandler {
     // Track which provider is running
     session.currentProvider = provider;
 
+    // Reset consecutive restart counter when generator starts fresh (not from crash recovery)
+    if (source !== 'crash-recovery') {
+      session.consecutiveRestarts = 0;
+    }
+
     session.generatorPromise = agent.startSession(session, this.workerService)
       .catch(error => {
         // Only log non-abort errors
         if (session.abortController.signal.aborted) return;
-        
+
         logger.error('SESSION', `Generator failed`, {
           sessionId: session.sessionDbId,
           provider: provider,
           error: error.message
         }, error);
+
+        // CRITICAL: Clear stale memory_session_id on "exit code 1" errors
+        // This prevents infinite restart loops when SDK context is lost
+        if (error.message?.includes('exited with code 1')) {
+          logger.warn('SESSION', `Clearing stale memory_session_id after exit code 1`, {
+            sessionId: session.sessionDbId,
+            staleId: session.memorySessionId
+          });
+          session.memorySessionId = undefined;
+          // Also clear in database
+          try {
+            const dbManager = this.workerService.dbManager;
+            dbManager.getSessionStore().updateMemorySessionId(session.sessionDbId, null);
+          } catch (dbError) {
+            logger.error('SESSION', 'Failed to clear stale memory_session_id in DB', {
+              sessionId: session.sessionDbId
+            }, dbError as Error);
+          }
+        }
 
         // Mark all processing messages as failed so they can be retried or abandoned
         const pendingStore = this.sessionManager.getPendingMessageStore();
@@ -181,16 +205,21 @@ export class SessionRoutes extends BaseRouteHandler {
         session.currentProvider = null;
         this.workerService.broadcastProcessingStatus();
 
-        // Crash recovery: If not aborted and still has work, restart
+        // Crash recovery: If not aborted and still has work, restart (with limit)
+        const MAX_CONSECUTIVE_RESTARTS = 3;
         if (!wasAborted) {
           try {
             const pendingStore = this.sessionManager.getPendingMessageStore();
             const pendingCount = pendingStore.getPendingCount(sessionDbId);
 
-            if (pendingCount > 0) {
+            // Track consecutive restarts to prevent infinite loops
+            session.consecutiveRestarts = (session.consecutiveRestarts || 0) + 1;
+
+            if (pendingCount > 0 && session.consecutiveRestarts <= MAX_CONSECUTIVE_RESTARTS) {
               logger.info('SESSION', `Restarting generator after crash/exit with pending work`, {
                 sessionId: sessionDbId,
-                pendingCount
+                pendingCount,
+                consecutiveRestarts: session.consecutiveRestarts
               });
 
               // Abort OLD controller before replacing to prevent child process leaks
@@ -205,6 +234,18 @@ export class SessionRoutes extends BaseRouteHandler {
                   this.startGeneratorWithProvider(stillExists, this.getSelectedProvider(), 'crash-recovery');
                 }
               }, 1000);
+            } else if (session.consecutiveRestarts > MAX_CONSECUTIVE_RESTARTS) {
+              logger.error('SESSION', `Session exceeded max consecutive restarts (${MAX_CONSECUTIVE_RESTARTS}), marking as failed`, {
+                sessionId: sessionDbId,
+                pendingCount
+              });
+              // Mark session as failed in database
+              try {
+                const dbManager = this.workerService.dbManager;
+                dbManager.getSessionStore().updateSessionStatus(sessionDbId, 'failed');
+              } catch (dbError) {
+                logger.error('SESSION', 'Failed to mark session as failed', { sessionId: sessionDbId }, dbError as Error);
+              }
             } else {
               // No pending work - abort to kill the child process
               session.abortController.abort();
