@@ -20,7 +20,7 @@ import { USER_SETTINGS_PATH } from '../../shared/paths.js';
 import type { ActiveSession, SDKUserMessage } from '../worker-types.js';
 import { ModeManager } from '../domain/ModeManager.js';
 import { processAgentResponse, type WorkerRef } from './agents/index.js';
-import { createPidCapturingSpawn, getProcessBySession, ensureProcessExit, getActiveCount } from './ProcessRegistry.js';
+import { createPidCapturingSpawn, getProcessBySession, ensureProcessExit, getActiveCount, forceCleanupOldProcesses } from './ProcessRegistry.js';
 
 // Import Agent SDK (assumes it's installed)
 // @ts-ignore - Agent SDK types may not be available
@@ -29,6 +29,14 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 // Maximum conversation history entries to keep (prevents "Prompt is too long" errors)
 // Haiku has smaller context than Opus/Sonnet, so we keep this conservative
 const MAX_HISTORY_LENGTH = 20;
+
+// Maximum time to wait for first SDK response before considering the session hung (Issue #818)
+// 3 minutes should be enough for initial connection - if longer, something is wrong
+const SDK_FIRST_RESPONSE_TIMEOUT_MS = 3 * 60 * 1000;
+
+// Maximum time between SDK messages before aborting (Issue #818)
+// If we don't receive any message for 2 minutes, the SDK is likely hung
+const SDK_IDLE_TIMEOUT_MS = 2 * 60 * 1000;
 
 export class SDKAgent {
   private dbManager: DatabaseManager;
@@ -42,6 +50,8 @@ export class SDKAgent {
   /**
    * Start SDK agent for a session (event-driven, no polling)
    * @param worker WorkerService reference for spinner control (optional)
+   *
+   * Issue #818: Improved pool management with aggressive cleanup when full
    */
   async startSession(session: ActiveSession, worker?: WorkerRef): Promise<void> {
     // Enforce subprocess pool limit to prevent resource exhaustion
@@ -49,18 +59,34 @@ export class SDKAgent {
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
     const maxConcurrentAgents = parseInt(settings.CLAUDE_MEM_MAX_CONCURRENT_AGENTS, 10) || 8;
 
-    const activeCount = getActiveCount();
+    let activeCount = getActiveCount();
     if (activeCount >= maxConcurrentAgents) {
-      logger.warn('AGENT', `Pool limit reached (${activeCount}/${maxConcurrentAgents}), waiting...`, {
+      logger.warn('AGENT', `Pool limit reached (${activeCount}/${maxConcurrentAgents}), attempting cleanup...`, {
         sessionDbId: session.sessionDbId
       });
-      // Wait for a slot to free up (max 60s)
-      for (let i = 0; i < 120; i++) {
-        await new Promise(r => setTimeout(r, 500));
-        if (getActiveCount() < maxConcurrentAgents) break;
+
+      // First try: force cleanup old processes (>2 min) to free slots
+      const cleaned = await forceCleanupOldProcesses();
+      if (cleaned > 0) {
+        logger.info('AGENT', `Force-cleaned ${cleaned} old processes, retrying...`, {
+          sessionDbId: session.sessionDbId
+        });
+        await new Promise(r => setTimeout(r, 500)); // Brief wait for cleanup
+        activeCount = getActiveCount();
       }
-      if (getActiveCount() >= maxConcurrentAgents) {
-        throw new Error('Agent pool timeout: too many concurrent subprocesses');
+
+      // If still full, wait with shorter timeout (15s instead of 60s)
+      if (activeCount >= maxConcurrentAgents) {
+        logger.warn('AGENT', `Pool still full after cleanup (${activeCount}/${maxConcurrentAgents}), waiting up to 15s...`, {
+          sessionDbId: session.sessionDbId
+        });
+        for (let i = 0; i < 30; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          if (getActiveCount() < maxConcurrentAgents) break;
+        }
+        if (getActiveCount() >= maxConcurrentAgents) {
+          throw new Error('Agent pool timeout: too many concurrent subprocesses (pool remained full after cleanup)');
+        }
       }
     }
 
@@ -141,11 +167,39 @@ export class SDKAgent {
       }
     });
 
-    // Process SDK messages
-    for await (const message of queryResult) {
-      // Capture memory session ID from first SDK message (any type has session_id)
-      // This enables resume for subsequent generator starts within the same user session
-      if (!session.memorySessionId && message.session_id) {
+    // Process SDK messages with timeout protection (Issue #818)
+    // Use a watchdog timer to abort if SDK goes silent
+    let lastMessageTime = Date.now();
+    let receivedFirstMessage = false;
+
+    // Watchdog that aborts if SDK is silent for too long
+    const watchdogInterval = setInterval(() => {
+      const now = Date.now();
+      const silentTime = now - lastMessageTime;
+      const timeout = receivedFirstMessage ? SDK_IDLE_TIMEOUT_MS : SDK_FIRST_RESPONSE_TIMEOUT_MS;
+
+      if (silentTime > timeout) {
+        const timeoutMinutes = Math.round(timeout / 60000);
+        logger.error('SDK', `Session timeout: no message for ${Math.round(silentTime / 1000)}s (limit: ${timeoutMinutes}m)`, {
+          sessionDbId: session.sessionDbId,
+          receivedFirstMessage,
+          silentTimeMs: silentTime,
+          timeoutMs: timeout
+        });
+        session.abortController.abort();
+        clearInterval(watchdogInterval);
+      }
+    }, 10000); // Check every 10 seconds
+
+    try {
+      for await (const message of queryResult) {
+        // Reset watchdog on every message
+        lastMessageTime = Date.now();
+        receivedFirstMessage = true;
+
+        // Capture memory session ID from first SDK message (any type has session_id)
+        // This enables resume for subsequent generator starts within the same user session
+        if (!session.memorySessionId && message.session_id) {
         // Try to persist to database for cross-restart recovery
         // This only works if memory_session_id is NULL (no existing observations)
         const updated = this.dbManager.getSessionStore().updateMemorySessionId(
@@ -249,10 +303,14 @@ export class SDKAgent {
         );
       }
 
-      // Log result messages
-      if (message.type === 'result' && message.subtype === 'success') {
-        // Usage telemetry is captured at SDK level
+        // Log result messages
+        if (message.type === 'result' && message.subtype === 'success') {
+          // Usage telemetry is captured at SDK level
+        }
       }
+    } finally {
+      // Always clear the watchdog when done (success or abort)
+      clearInterval(watchdogInterval);
     }
 
     // Mark session complete
