@@ -66,6 +66,10 @@ export class DataRoutes extends BaseRouteHandler {
 
     // Import endpoint
     app.post('/api/import', this.handleImport.bind(this));
+
+    // Chroma sync endpoints
+    app.post('/api/chroma/backfill', this.handleChromaBackfill.bind(this));
+    app.get('/api/chroma/status', this.handleChromaStatus.bind(this));
   }
 
   /**
@@ -515,5 +519,64 @@ export class DataRoutes extends BaseRouteHandler {
     setTimeout(() => {
       process.exit(0); // Daemon mode will restart automatically
     }, 1000);
+  });
+
+  /**
+   * Trigger Chroma backfill to sync all observations to vector store
+   * POST /api/chroma/backfill
+   */
+  private handleChromaBackfill = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    const chromaSync = this.dbManager.getChromaSync();
+
+    if (chromaSync.isDisabled()) {
+      res.status(400).json({
+        success: false,
+        error: 'Chroma is disabled. Enable it in settings first.'
+      });
+      return;
+    }
+
+    logger.info('CHROMA_SYNC', 'Backfill requested via API');
+
+    // Run backfill in background, return immediately
+    chromaSync.ensureBackfilled()
+      .then(() => {
+        logger.info('CHROMA_SYNC', 'Backfill completed successfully');
+      })
+      .catch((error) => {
+        logger.error('CHROMA_SYNC', 'Backfill failed', {}, error as Error);
+      });
+
+    res.json({
+      success: true,
+      message: 'Backfill started in background. Check logs for progress.'
+    });
+  });
+
+  /**
+   * Get Chroma sync status
+   * GET /api/chroma/status
+   */
+  private handleChromaStatus = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    const chromaSync = this.dbManager.getChromaSync();
+
+    if (chromaSync.isDisabled()) {
+      res.json({
+        enabled: false,
+        connected: false,
+        message: 'Chroma is disabled in settings'
+      });
+      return;
+    }
+
+    const store = this.dbManager.getSessionStore();
+    const sqliteCount = store.db.prepare('SELECT COUNT(*) as count FROM observations').get() as { count: number };
+
+    res.json({
+      enabled: true,
+      connected: chromaSync.isConnected(),
+      sqliteObservations: sqliteCount.count,
+      message: chromaSync.isConnected() ? 'Chroma connected' : 'Chroma not yet connected (connects on first use)'
+    });
   });
 }

@@ -399,7 +399,7 @@ export class WorkerService {
         }
         return activeIds;
       });
-      logger.info('SYSTEM', 'Started orphan reaper (runs every 5 minutes)');
+      logger.info('SYSTEM', 'Started orphan reaper (runs every 60 seconds)');
 
       // Auto-recover orphaned queues (fire-and-forget with error logging)
       this.processPendingQueues(50).then(result => {
