@@ -20,6 +20,7 @@ import { SSEBroadcaster } from '../../SSEBroadcaster.js';
 import type { WorkerService } from '../../../worker-service.js';
 import { BaseRouteHandler } from '../BaseRouteHandler.js';
 import { getActiveProcesses, getActiveCount } from '../../ProcessRegistry.js';
+import { ChromaSync } from '../../../sync/ChromaSync.js';
 
 export class DataRoutes extends BaseRouteHandler {
   constructor(
@@ -70,6 +71,7 @@ export class DataRoutes extends BaseRouteHandler {
 
     // Chroma sync endpoints
     app.post('/api/chroma/backfill', this.handleChromaBackfill.bind(this));
+    app.post('/api/chroma/backfill-all', this.handleChromaBackfillAll.bind(this));
     app.get('/api/chroma/status', this.handleChromaStatus.bind(this));
   }
 
@@ -554,6 +556,79 @@ export class DataRoutes extends BaseRouteHandler {
       success: true,
       message: 'Backfill started in background. Check logs for progress.'
     });
+  });
+
+  /**
+   * Trigger Chroma backfill for ALL projects
+   * POST /api/chroma/backfill-all
+   * This syncs observations from all projects to their respective Chroma collections
+   */
+  private handleChromaBackfillAll = this.wrapHandler(async (req: Request, res: Response): Promise<void> => {
+    const chromaSync = this.dbManager.getChromaSync();
+
+    if (chromaSync.isDisabled()) {
+      res.status(400).json({
+        success: false,
+        error: 'Chroma is disabled. Enable it in settings first.'
+      });
+      return;
+    }
+
+    // Get all distinct projects from database
+    const store = this.dbManager.getSessionStore();
+    const projects = store.db.prepare(`
+      SELECT DISTINCT project FROM observations
+      ORDER BY (SELECT COUNT(*) FROM observations o2 WHERE o2.project = observations.project) DESC
+    `).all() as { project: string }[];
+
+    const projectList = projects.map(p => p.project);
+    logger.info('CHROMA_SYNC', 'Backfill-all requested via API', { projectCount: projectList.length });
+
+    // Return immediately with project list
+    res.json({
+      success: true,
+      message: `Backfill started for ${projectList.length} projects. Check logs for progress.`,
+      projects: projectList
+    });
+
+    // Run backfill for each project in background (sequentially to avoid overwhelming Chroma)
+    (async () => {
+      let completed = 0;
+      let failed = 0;
+      const startTime = Date.now();
+
+      for (let i = 0; i < projectList.length; i++) {
+        const project = projectList[i];
+        const projectNum = i + 1;
+        try {
+          logger.info('CHROMA_SYNC', `Backfill-all: starting project ${projectNum}/${projectList.length}`, { project });
+          const projectChroma = new ChromaSync(project);
+          await projectChroma.ensureBackfilled();
+          await projectChroma.close();
+          completed++;
+          logger.info('CHROMA_SYNC', `Backfill-all: completed project ${projectNum}/${projectList.length}`, {
+            project,
+            completedSoFar: completed,
+            failedSoFar: failed
+          });
+        } catch (error) {
+          failed++;
+          logger.error('CHROMA_SYNC', `Backfill-all: failed project ${projectNum}/${projectList.length}`, {
+            project,
+            completedSoFar: completed,
+            failedSoFar: failed
+          }, error as Error);
+        }
+      }
+
+      const duration = Math.round((Date.now() - startTime) / 1000);
+      logger.info('CHROMA_SYNC', 'Backfill-all completed', {
+        total: projectList.length,
+        completed,
+        failed,
+        durationSeconds: duration
+      });
+    })();
   });
 
   /**
