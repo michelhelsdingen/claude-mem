@@ -380,7 +380,7 @@ export class WorkerService {
         }
         return activeIds;
       });
-      logger.info('SYSTEM', 'Started orphan reaper (runs every 5 minutes)');
+      logger.info('SYSTEM', 'Started orphan reaper (runs every 60 seconds)');
 
       // Chroma watchdog: check if chroma-mcp is responsive, restart if dead
       if (settings.CLAUDE_MEM_CHROMA_DISABLED !== 'true') {
