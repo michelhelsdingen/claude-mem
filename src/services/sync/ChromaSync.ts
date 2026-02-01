@@ -651,6 +651,7 @@ export class ChromaSync {
   /**
    * Fetch all existing document IDs from Chroma collection
    * Returns Sets of SQLite IDs for observations, summaries, and prompts
+   * Returns empty sets if collection doesn't exist or is empty (safe for backfill)
    */
   private async getExistingChromaIds(): Promise<{
     observations: Set<number>;
@@ -693,7 +694,16 @@ export class ChromaSync {
           throw new Error('Unexpected response type from chroma_get_documents');
         }
 
-        const parsed = JSON.parse(data.text);
+        // Handle error responses from Chroma (e.g., collection doesn't exist)
+        const textContent = data.text;
+        if (textContent.startsWith('Error') || textContent.includes('does not exist')) {
+          logger.info('CHROMA_SYNC', 'Collection empty or does not exist, will sync all documents', {
+            project: this.project
+          });
+          return { observations: observationIds, summaries: summaryIds, prompts: promptIds };
+        }
+
+        const parsed = JSON.parse(textContent);
         const metadatas = parsed.metadatas || [];
 
         if (metadatas.length === 0) {
@@ -721,6 +731,15 @@ export class ChromaSync {
           batchSize: metadatas.length
         });
       } catch (error) {
+        // If we can't fetch existing IDs, assume empty collection (safe: will re-sync everything)
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        if (errorMsg.includes('does not exist') || errorMsg.includes('not found') || errorMsg.includes('JSON Parse error')) {
+          logger.info('CHROMA_SYNC', 'Collection query failed, assuming empty collection', {
+            project: this.project,
+            error: errorMsg
+          });
+          return { observations: observationIds, summaries: summaryIds, prompts: promptIds };
+        }
         logger.error('CHROMA_SYNC', 'Failed to fetch existing IDs', { project: this.project }, error as Error);
         throw error;
       }

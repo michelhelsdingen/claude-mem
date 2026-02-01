@@ -31,7 +31,11 @@ src/ui/viewer.html
 
 # Prevent other malformed path directories
 http*/
+<<<<<<< HEAD
 https*/
 
 # Ignore WebStorm project files (for dinosaur IDE users)
 .idea/
+=======
+https*/**/CLAUDE.md
+>>>>>>> 1373c2fb (chore: remove CLAUDE.md files from tracking for privacy)
