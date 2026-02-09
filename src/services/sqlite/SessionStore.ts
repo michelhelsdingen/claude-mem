@@ -48,6 +48,7 @@ export class SessionStore {
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
     this.addOnUpdateCascadeToForeignKeys();
+    this.addPendingMessagesCompositeIndex();
   }
 
   /**
@@ -823,6 +824,21 @@ export class SessionStore {
       this.db.run('PRAGMA foreign_keys = ON');
       throw error;
     }
+  }
+
+  /**
+   * Add composite index for pending_messages queue queries (migration 22)
+   * claimAndDelete() queries WHERE session_db_id = ? AND status = 'pending' ORDER BY id ASC
+   * This composite index covers that query pattern efficiently.
+   */
+  private addPendingMessagesCompositeIndex(): void {
+    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(22) as SchemaVersion | undefined;
+    if (applied) return;
+
+    this.db.run('CREATE INDEX IF NOT EXISTS idx_pending_messages_session_status_id ON pending_messages(session_db_id, status, id)');
+
+    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(22, new Date().toISOString());
+    logger.debug('DB', 'Added composite index for pending_messages queue queries');
   }
 
   /**
