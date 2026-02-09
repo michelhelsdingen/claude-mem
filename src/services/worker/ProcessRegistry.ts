@@ -69,6 +69,10 @@ export function getProcessBySession(sessionDbId: number): TrackedProcess | undef
 /**
  * Get all active PIDs (for debugging)
  */
+export function getActiveCount(): number {
+  return processRegistry.size;
+}
+
 export function getActiveProcesses(): Array<{ pid: number; sessionDbId: number; ageMs: number }> {
   const now = Date.now();
   return Array.from(processRegistry.values()).map(info => ({
