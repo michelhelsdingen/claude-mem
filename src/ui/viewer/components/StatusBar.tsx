@@ -55,15 +55,20 @@ export function StatusBar() {
         onMouseEnter={() => setShowSessionsDropdown(true)}
         onMouseLeave={() => setShowSessionsDropdown(false)}
       >
-        <span className={`status-dot ${sessionCount > 0 ? 'active' : 'inactive'}`} />
-        <span className="status-label">{sessionCount} session{sessionCount !== 1 ? 's' : ''}</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ stroke: sessionCount > 0 ? '#22c55e' : '#6b7280' }}>
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+        </svg>
+        <span className="status-label">{sessionCount}</span>
 
         {showSessionsDropdown && sessions.length > 0 && (
           <div className="status-dropdown">
             <div className="dropdown-header">Active Sessions</div>
             {sessions.map(session => (
               <div key={session.sessionDbId} className="dropdown-item">
-                <span className={`status-dot ${session.hasGenerator ? 'processing' : 'idle'}`} />
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" strokeWidth="2" style={{ stroke: session.hasGenerator ? '#f59e0b' : '#6b7280' }}>
+                  <circle cx="12" cy="12" r="10" />
+                  {session.hasGenerator && <path d="M12 6v6l4 2" />}
+                </svg>
                 <span className="dropdown-project">{session.project}</span>
                 <span className="dropdown-meta">
                   #{session.sessionDbId} ({formatAge(session.ageMs)})
@@ -80,8 +85,15 @@ export function StatusBar() {
         onMouseEnter={() => setShowProcessesDropdown(true)}
         onMouseLeave={() => setShowProcessesDropdown(false)}
       >
-        <span className={`status-dot ${processCount > 0 ? 'processing' : 'inactive'}`} />
-        <span className="status-label">{poolUsage} proc</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ stroke: processCount > 0 ? '#f59e0b' : '#6b7280' }}>
+          <rect x="4" y="4" width="16" height="16" rx="2" />
+          <rect x="9" y="9" width="6" height="6" />
+          <path d="M9 1v3" /><path d="M15 1v3" />
+          <path d="M9 20v3" /><path d="M15 20v3" />
+          <path d="M20 9h3" /><path d="M20 14h3" />
+          <path d="M1 9h3" /><path d="M1 14h3" />
+        </svg>
+        <span className="status-label">{poolUsage}</span>
 
         {showProcessesDropdown && processes.length > 0 && (
           <div className="status-dropdown">
@@ -99,33 +111,36 @@ export function StatusBar() {
       </div>
 
       {/* Quick actions */}
-      <div className="status-actions">
+      <div className="status-actions" style={{ display: 'flex', gap: '4px' }}>
         <button
-          className={`status-action-btn ${confirmRestart ? 'confirm' : ''}`}
           onClick={handleRestart}
-          title={confirmRestart ? 'Click again to confirm restart' : 'Restart Worker'}
+          title={confirmRestart ? 'Click again to confirm' : 'Restart Worker'}
+          style={{
+            padding: '4px 8px',
+            fontSize: '12px',
+            border: '1px solid #444',
+            borderRadius: '4px',
+            background: confirmRestart ? '#3b82f6' : '#2a2a2a',
+            color: confirmRestart ? 'white' : '#9ca3af',
+            cursor: 'pointer'
+          }}
         >
-          {confirmRestart ? '?' : (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-              <path d="M3 3v5h5" />
-              <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16" />
-              <path d="M16 16h5v5" />
-            </svg>
-          )}
+          {confirmRestart ? 'OK?' : 'Restart'}
         </button>
         <button
-          className={`status-action-btn ${confirmClear ? 'confirm' : ''}`}
           onClick={handleClearQueue}
-          title={confirmClear ? 'Click again to confirm clear' : 'Clear Queue'}
+          title={confirmClear ? 'Click again to confirm' : 'Clear Queue'}
+          style={{
+            padding: '4px 8px',
+            fontSize: '12px',
+            border: '1px solid #444',
+            borderRadius: '4px',
+            background: confirmClear ? '#ef4444' : '#2a2a2a',
+            color: confirmClear ? 'white' : '#9ca3af',
+            cursor: 'pointer'
+          }}
         >
-          {confirmClear ? '?' : (
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M3 6h18" />
-              <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" />
-              <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" />
-            </svg>
-          )}
+          {confirmClear ? 'OK?' : 'Clear'}
         </button>
       </div>
     </div>
