@@ -67,13 +67,27 @@ interface SessionEndEvent {
   durationMs?: number;
 }
 
+interface MessageReceivedEvent {
+  from: string;
+  content: string;
+  timestamp?: number;
+  metadata?: Record<string, unknown>;
+}
+
 interface EventContext {
   sessionKey?: string;
   workspaceDir?: string;
   agentId?: string;
 }
 
+interface MessageContext {
+  channelId: string;
+  accountId?: string;
+  conversationId?: string;
+}
+
 type EventCallback<T> = (event: T, ctx: EventContext) => void | Promise<void>;
+type MessageEventCallback<T> = (event: T, ctx: MessageContext) => void | Promise<void>;
 
 interface OpenClawPluginApi {
   id: string;
@@ -100,6 +114,7 @@ interface OpenClawPluginApi {
       ((event: "agent_end", callback: EventCallback<AgentEndEvent>) => void) &
       ((event: "session_start", callback: EventCallback<SessionStartEvent>) => void) &
       ((event: "session_end", callback: EventCallback<SessionEndEvent>) => void) &
+      ((event: "message_received", callback: MessageEventCallback<MessageReceivedEvent>) => void) &
       ((event: "after_compaction", callback: EventCallback<AfterCompactionEvent>) => void) &
       ((event: "gateway_start", callback: EventCallback<Record<string, never>>) => void);
   runtime: {
@@ -141,6 +156,14 @@ type ConnectionState = "disconnected" | "connected" | "reconnecting";
 // Plugin Configuration
 // ============================================================================
 
+interface FeedEmojiConfig {
+  primary?: string;
+  claudeCode?: string;
+  claudeCodeLabel?: string;
+  default?: string;
+  agents?: Record<string, string>;
+}
+
 interface ClaudeMemPluginConfig {
   syncMemoryFile?: boolean;
   project?: string;
@@ -149,6 +172,8 @@ interface ClaudeMemPluginConfig {
     enabled?: boolean;
     channel?: string;
     to?: string;
+    botToken?: string;
+    emojis?: FeedEmojiConfig;
   };
 }
 
@@ -158,44 +183,58 @@ interface ClaudeMemPluginConfig {
 
 const MAX_SSE_BUFFER_SIZE = 1024 * 1024; // 1MB
 const DEFAULT_WORKER_PORT = 37777;
-const TOOL_RESULT_MAX_LENGTH = 1000;
 
-// Agent emoji map for observation feed messages.
-// When creating a new OpenClaw agent, add its agentId and emoji here.
-const AGENT_EMOJI_MAP: Record<string, string> = {
-  "main":          "🦞",
-  "openclaw":      "🦞",
-  "devops":        "🔧",
-  "architect":     "📐",
-  "researcher":    "🔍",
-  "code-reviewer": "🔎",
-  "coder":         "💻",
-  "tester":        "🧪",
-  "debugger":      "🐛",
-  "opsec":         "🛡️",
-  "cloudfarm":     "☁️",
-  "extractor":     "📦",
-};
+// Emoji pool for deterministic auto-assignment to unknown agents.
+// Uses a hash of the agentId to pick a consistent emoji — no persistent state needed.
+const EMOJI_POOL = [
+  "🔧","📐","🔍","💻","🧪","🐛","🛡️","☁️","📦","🎯",
+  "🔮","⚡","🌊","🎨","📊","🚀","🔬","🏗️","📝","🎭",
+];
 
-// Project prefixes that indicate Claude Code sessions (not OpenClaw agents)
-const CLAUDE_CODE_EMOJI = "⌨️";
-const OPENCLAW_DEFAULT_EMOJI = "🦀";
-
-function getSourceLabel(project: string | null | undefined): string {
-  if (!project) return OPENCLAW_DEFAULT_EMOJI;
-  // OpenClaw agent projects are formatted as "openclaw-<agentId>"
-  if (project.startsWith("openclaw-")) {
-    const agentId = project.slice("openclaw-".length);
-    const emoji = AGENT_EMOJI_MAP[agentId] || OPENCLAW_DEFAULT_EMOJI;
-    return `${emoji} ${agentId}`;
+function poolEmojiForAgent(agentId: string): string {
+  let hash = 0;
+  for (let i = 0; i < agentId.length; i++) {
+    hash = ((hash << 5) - hash + agentId.charCodeAt(i)) | 0;
   }
-  // OpenClaw project without agent suffix
-  if (project === "openclaw") {
-    return `🦞 openclaw`;
-  }
-  // Everything else is from Claude Code (project = working directory name)
-  const emoji = CLAUDE_CODE_EMOJI;
-  return `${emoji} ${project}`;
+  return EMOJI_POOL[Math.abs(hash) % EMOJI_POOL.length];
+}
+
+// Default emoji values — overridden by user config via observationFeed.emojis
+const DEFAULT_PRIMARY_EMOJI = "🦞";
+const DEFAULT_CLAUDE_CODE_EMOJI = "⌨️";
+const DEFAULT_CLAUDE_CODE_LABEL = "Claude Code Session";
+const DEFAULT_FALLBACK_EMOJI = "🦀";
+
+function buildGetSourceLabel(
+  emojiConfig: FeedEmojiConfig | undefined
+): (project: string | null | undefined) => string {
+  const primary = emojiConfig?.primary ?? DEFAULT_PRIMARY_EMOJI;
+  const claudeCode = emojiConfig?.claudeCode ?? DEFAULT_CLAUDE_CODE_EMOJI;
+  const claudeCodeLabel = emojiConfig?.claudeCodeLabel ?? DEFAULT_CLAUDE_CODE_LABEL;
+  const fallback = emojiConfig?.default ?? DEFAULT_FALLBACK_EMOJI;
+  const pinnedAgents = emojiConfig?.agents ?? {};
+
+  return function getSourceLabel(project: string | null | undefined): string {
+    if (!project) return fallback;
+    // OpenClaw agent projects are formatted as "openclaw-<agentId>"
+    if (project.startsWith("openclaw-")) {
+      const agentId = project.slice("openclaw-".length);
+      if (!agentId) return `${primary} openclaw`;
+      const emoji = pinnedAgents[agentId] || poolEmojiForAgent(agentId);
+      return `${emoji} ${agentId}`;
+    }
+    // OpenClaw project without agent suffix
+    if (project === "openclaw") {
+      return `${primary} openclaw`;
+    }
+    // Everything else is a Claude Code session. Keep the project identifier
+    // visible so concurrent sessions can be distinguished in the feed.
+    const trimmedLabel = claudeCodeLabel.trim();
+    if (!trimmedLabel) {
+      return `${claudeCode} ${project}`;
+    }
+    return `${claudeCode} ${trimmedLabel} (${project})`;
+  };
 }
 
 // ============================================================================
@@ -265,11 +304,30 @@ async function workerGetText(
   }
 }
 
+async function workerGetJson(
+  port: number,
+  path: string,
+  logger: PluginLogger
+): Promise<Record<string, unknown> | null> {
+  const text = await workerGetText(port, path, logger);
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    logger.warn(`[claude-mem] Worker GET ${path} returned non-JSON response`);
+    return null;
+  }
+}
+
 // ============================================================================
 // SSE Observation Feed
 // ============================================================================
 
-function formatObservationMessage(observation: ObservationSSEPayload): string {
+function formatObservationMessage(
+  observation: ObservationSSEPayload,
+  getSourceLabel: (project: string | null | undefined) => string,
+): string {
   const title = observation.title || "Untitled";
   const source = getSourceLabel(observation.project);
   let message = `${source}\n**${title}**`;
@@ -291,12 +349,44 @@ const CHANNEL_SEND_MAP: Record<string, { namespace: string; functionName: string
   line: { namespace: "line", functionName: "sendMessageLine" },
 };
 
+async function sendDirectTelegram(
+  botToken: string,
+  chatId: string,
+  text: string,
+  logger: PluginLogger
+): Promise<void> {
+  try {
+    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+        parse_mode: "Markdown",
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      logger.warn(`[claude-mem] Direct Telegram send failed (${response.status}): ${body}`);
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    logger.warn(`[claude-mem] Direct Telegram send error: ${message}`);
+  }
+}
+
 function sendToChannel(
   api: OpenClawPluginApi,
   channel: string,
   to: string,
-  text: string
+  text: string,
+  botToken?: string
 ): Promise<void> {
+  // If a dedicated bot token is provided for Telegram, send directly
+  if (botToken && channel === "telegram") {
+    return sendDirectTelegram(botToken, to, text, api.logger);
+  }
+
   const mapping = CHANNEL_SEND_MAP[channel];
   if (!mapping) {
     api.logger.warn(`[claude-mem] Unsupported channel type: ${channel}`);
@@ -332,7 +422,9 @@ async function connectToSSEStream(
   channel: string,
   to: string,
   abortController: AbortController,
-  setConnectionState: (state: ConnectionState) => void
+  setConnectionState: (state: ConnectionState) => void,
+  getSourceLabel: (project: string | null | undefined) => string,
+  botToken?: string
 ): Promise<void> {
   let backoffMs = 1000;
   const maxBackoffMs = 30000;
@@ -392,8 +484,8 @@ async function connectToSSEStream(
             const parsed = JSON.parse(jsonStr);
             if (parsed.type === "new_observation" && parsed.observation) {
               const event = parsed as SSENewObservationEvent;
-              const message = formatObservationMessage(event.observation);
-              await sendToChannel(api, channel, to, message);
+              const message = formatObservationMessage(event.observation, getSourceLabel);
+              await sendToChannel(api, channel, to, message, botToken);
             }
           } catch (parseError: unknown) {
             const errorMessage = parseError instanceof Error ? parseError.message : String(parseError);
@@ -427,6 +519,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   const userConfig = (api.pluginConfig || {}) as ClaudeMemPluginConfig;
   const workerPort = userConfig.workerPort || DEFAULT_WORKER_PORT;
   const baseProjectName = userConfig.project || "openclaw";
+  const getSourceLabel = buildGetSourceLabel(userConfig.observationFeed?.emojis);
 
   function getProjectName(ctx: EventContext): string {
     if (ctx.agentId) {
@@ -450,10 +543,16 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     return sessionIds.get(key)!;
   }
 
-  async function syncMemoryToWorkspace(workspaceDir: string): Promise<void> {
+  async function syncMemoryToWorkspace(workspaceDir: string, ctx?: EventContext): Promise<void> {
+    // Include both the base project and agent-scoped project (e.g. "openclaw" + "openclaw-main")
+    const projects = [baseProjectName];
+    const agentProject = ctx ? getProjectName(ctx) : null;
+    if (agentProject && agentProject !== baseProjectName) {
+      projects.push(agentProject);
+    }
     const contextText = await workerGetText(
       workerPort,
-      `/api/context/inject?projects=${encodeURIComponent(baseProjectName)}`,
+      `/api/context/inject?projects=${encodeURIComponent(projects.join(","))}`,
       api.logger
     );
     if (contextText && contextText.trim().length > 0) {
@@ -483,6 +582,20 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   });
 
   // ------------------------------------------------------------------
+  // Event: message_received — capture inbound user prompts from channels
+  // ------------------------------------------------------------------
+  api.on("message_received", async (event, ctx) => {
+    const sessionKey = ctx.conversationId || ctx.channelId || "default";
+    const contentSessionId = getContentSessionId(sessionKey);
+
+    await workerPost(workerPort, "/api/sessions/init", {
+      contentSessionId,
+      project: baseProjectName,
+      prompt: event.content || "[media prompt]",
+    }, api.logger);
+  });
+
+  // ------------------------------------------------------------------
   // Event: after_compaction — re-init session after context compaction
   // ------------------------------------------------------------------
   api.on("after_compaction", async (_event, ctx) => {
@@ -500,7 +613,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   // ------------------------------------------------------------------
   // Event: before_agent_start — init session + sync MEMORY.md + track workspace
   // ------------------------------------------------------------------
-  api.on("before_agent_start", async (_event, ctx) => {
+  api.on("before_agent_start", async (event, ctx) => {
     // Track workspace dir so tool_result_persist can sync MEMORY.md later
     if (ctx.workspaceDir) {
       workspaceDirsBySessionKey.set(ctx.sessionKey || "default", ctx.workspaceDir);
@@ -512,12 +625,12 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     await workerPost(workerPort, "/api/sessions/init", {
       contentSessionId,
       project: getProjectName(ctx),
-      prompt: ctx.sessionKey || "agent run",
+      prompt: event.prompt || "agent run",
     }, api.logger);
 
     // Sync MEMORY.md before agent runs (provides context to agent)
     if (syncMemoryFile && ctx.workspaceDir) {
-      await syncMemoryToWorkspace(ctx.workspaceDir);
+      await syncMemoryToWorkspace(ctx.workspaceDir, ctx);
     }
   });
 
@@ -527,20 +640,18 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
   api.on("tool_result_persist", (event, ctx) => {
     api.logger.info(`[claude-mem] tool_result_persist fired: tool=${event.toolName ?? "unknown"} agent=${ctx.agentId ?? "none"} session=${ctx.sessionKey ?? "none"}`);
     const toolName = event.toolName;
-    if (!toolName || toolName.startsWith("memory_")) return;
+    if (!toolName) return;
 
     const contentSessionId = getContentSessionId(ctx.sessionKey);
 
-    // Extract result text from message content
+    // Extract result text from all content blocks
     let toolResponseText = "";
     const content = event.message?.content;
     if (Array.isArray(content)) {
-      const textBlock = content.find(
-        (block) => block.type === "tool_result" || block.type === "text"
-      );
-      if (textBlock && "text" in textBlock) {
-        toolResponseText = String(textBlock.text).slice(0, TOOL_RESULT_MAX_LENGTH);
-      }
+      toolResponseText = content
+        .filter((block) => (block.type === "tool_result" || block.type === "text") && "text" in block)
+        .map((block) => String(block.text))
+        .join("\n");
     }
 
     // Fire-and-forget: send observation + sync MEMORY.md in parallel
@@ -554,7 +665,7 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
 
     const workspaceDir = ctx.workspaceDir || workspaceDirsBySessionKey.get(ctx.sessionKey || "default");
     if (syncMemoryFile && workspaceDir) {
-      syncMemoryToWorkspace(workspaceDir);
+      syncMemoryToWorkspace(workspaceDir, ctx);
     }
   });
 
@@ -653,7 +764,9 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
         feedConfig.channel,
         feedConfig.to,
         sseAbortController,
-        (state) => { connectionState = state; }
+        (state) => { connectionState = state; },
+        getSourceLabel,
+        feedConfig.botToken
       );
     },
     stop: async (_ctx) => {
@@ -670,65 +783,222 @@ export default function claudeMemPlugin(api: OpenClawPluginApi): void {
     },
   });
 
+  function summarizeSearchResults(items: unknown[], limit = 5): string {
+    if (!Array.isArray(items) || items.length === 0) {
+      return "No results found.";
+    }
+
+    return items
+      .slice(0, limit)
+      .map((item, index) => {
+        const row = item as Record<string, unknown>;
+        const title = String(row.title || row.subtitle || row.text || "Untitled");
+        const project = row.project ? ` [${String(row.project)}]` : "";
+        return `${index + 1}. ${title}${project}`;
+      })
+      .join("\n");
+  }
+
+  function parseLimit(arg: string | undefined, fallback = 10): number {
+    const parsed = Number(arg);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.max(1, Math.min(50, Math.trunc(parsed)));
+  }
+
   // ------------------------------------------------------------------
-  // Command: /claude-mem-feed — status & toggle
+  // Command: /claude_mem_feed — status & toggle
   // ------------------------------------------------------------------
   api.registerCommand({
-    name: "claude-mem-feed",
+    name: "claude_mem_feed",
     description: "Show or toggle Claude-Mem observation feed status",
     acceptsArgs: true,
     handler: async (ctx) => {
       const feedConfig = userConfig.observationFeed;
 
       if (!feedConfig) {
-        return "Observation feed not configured. Add observationFeed to your plugin config.";
+        return { text: "Observation feed not configured. Add observationFeed to your plugin config." };
       }
 
       const arg = ctx.args?.trim();
 
       if (arg === "on") {
         api.logger.info("[claude-mem] Feed enable requested via command");
-        return "Feed enable requested. Update observationFeed.enabled in your plugin config to persist.";
+        return { text: "Feed enable requested. Update observationFeed.enabled in your plugin config to persist." };
       }
 
       if (arg === "off") {
         api.logger.info("[claude-mem] Feed disable requested via command");
-        return "Feed disable requested. Update observationFeed.enabled in your plugin config to persist.";
+        return { text: "Feed disable requested. Update observationFeed.enabled in your plugin config to persist." };
       }
 
-      return [
+      return { text: [
         "Claude-Mem Observation Feed",
         `Enabled: ${feedConfig.enabled ? "yes" : "no"}`,
         `Channel: ${feedConfig.channel || "not set"}`,
         `Target: ${feedConfig.to || "not set"}`,
         `Connection: ${connectionState}`,
+      ].join("\n") };
+    },
+  });
+
+  // ------------------------------------------------------------------
+  // Command: /claude-mem-search — query worker search API
+  // Usage: /claude-mem-search <query> [limit]
+  // ------------------------------------------------------------------
+  api.registerCommand({
+    name: "claude-mem-search",
+    description: "Search Claude-Mem observations by query",
+    acceptsArgs: true,
+    handler: async (ctx) => {
+      const raw = ctx.args?.trim() || "";
+      if (!raw) {
+        return "Usage: /claude-mem-search <query> [limit]";
+      }
+
+      const pieces = raw.split(/\s+/);
+      const maybeLimit = pieces[pieces.length - 1];
+      const hasTrailingLimit = /^\d+$/.test(maybeLimit);
+      const limit = hasTrailingLimit ? parseLimit(maybeLimit, 10) : 10;
+      const query = hasTrailingLimit ? pieces.slice(0, -1).join(" ") : raw;
+
+      const data = await workerGetJson(
+        workerPort,
+        `/api/search/observations?query=${encodeURIComponent(query)}&limit=${limit}`,
+        api.logger,
+      );
+
+      if (!data) {
+        return "Claude-Mem search failed (worker unavailable or invalid response).";
+      }
+
+      const items = Array.isArray(data.items) ? data.items : [];
+      return [
+        `Claude-Mem Search: \"${query}\"`,
+        summarizeSearchResults(items, limit),
       ].join("\n");
     },
   });
 
   // ------------------------------------------------------------------
-  // Command: /claude-mem-status — worker health check
+  // Command: /claude-mem-recent — recent context snapshot
+  // Usage: /claude-mem-recent [project] [limit]
   // ------------------------------------------------------------------
   api.registerCommand({
-    name: "claude-mem-status",
+    name: "claude-mem-recent",
+    description: "Show recent Claude-Mem context for a project",
+    acceptsArgs: true,
+    handler: async (ctx) => {
+      const raw = ctx.args?.trim() || "";
+      const parts = raw ? raw.split(/\s+/) : [];
+      const maybeLimit = parts.length > 0 ? parts[parts.length - 1] : "";
+      const hasTrailingLimit = /^\d+$/.test(maybeLimit);
+      const limit = hasTrailingLimit ? parseLimit(maybeLimit, 3) : 3;
+      const project = hasTrailingLimit ? parts.slice(0, -1).join(" ") : raw;
+
+      const params = new URLSearchParams();
+      params.set("limit", String(limit));
+      if (project) params.set("project", project);
+
+      const data = await workerGetJson(
+        workerPort,
+        `/api/context/recent?${params.toString()}`,
+        api.logger,
+      );
+
+      if (!data) {
+        return "Claude-Mem recent context failed (worker unavailable or invalid response).";
+      }
+
+      const summaries = Array.isArray(data.session_summaries) ? data.session_summaries : [];
+      const observations = Array.isArray(data.recent_observations) ? data.recent_observations : [];
+
+      return [
+        "Claude-Mem Recent Context",
+        `Project: ${project || "(auto)"}`,
+        `Session summaries: ${summaries.length}`,
+        `Recent observations: ${observations.length}`,
+        summarizeSearchResults(observations, Math.min(5, observations.length || 5)),
+      ].join("\n");
+    },
+  });
+
+  // ------------------------------------------------------------------
+  // Command: /claude-mem-timeline — search and timeline around best match
+  // Usage: /claude-mem-timeline <query> [depthBefore] [depthAfter]
+  // ------------------------------------------------------------------
+  api.registerCommand({
+    name: "claude-mem-timeline",
+    description: "Find best memory match and show nearby timeline events",
+    acceptsArgs: true,
+    handler: async (ctx) => {
+      const raw = ctx.args?.trim() || "";
+      if (!raw) {
+        return "Usage: /claude-mem-timeline <query> [depthBefore] [depthAfter]";
+      }
+
+      const parts = raw.split(/\s+/);
+      let depthAfter = 5;
+      let depthBefore = 5;
+
+      if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) {
+        depthAfter = parseLimit(parts.pop(), 5);
+      }
+      if (parts.length >= 2 && /^\d+$/.test(parts[parts.length - 1])) {
+        depthBefore = parseLimit(parts.pop(), 5);
+      }
+
+      const query = parts.join(" ");
+      const params = new URLSearchParams({
+        query,
+        mode: "auto",
+        depth_before: String(depthBefore),
+        depth_after: String(depthAfter),
+      });
+
+      const data = await workerGetJson(
+        workerPort,
+        `/api/timeline/by-query?${params.toString()}`,
+        api.logger,
+      );
+
+      if (!data) {
+        return "Claude-Mem timeline lookup failed (worker unavailable or invalid response).";
+      }
+
+      const timeline = Array.isArray(data.timeline) ? data.timeline : [];
+      const anchor = data.anchor ? String(data.anchor) : "(none)";
+
+      return [
+        `Claude-Mem Timeline: \"${query}\"`,
+        `Anchor: ${anchor}`,
+        summarizeSearchResults(timeline, 8),
+      ].join("\n");
+    },
+  });
+
+  // ------------------------------------------------------------------
+  // Command: /claude_mem_status — worker health check
+  // ------------------------------------------------------------------
+  api.registerCommand({
+    name: "claude_mem_status",
     description: "Check Claude-Mem worker health and session status",
     handler: async () => {
       const healthText = await workerGetText(workerPort, "/api/health", api.logger);
       if (!healthText) {
-        return `Claude-Mem worker unreachable at port ${workerPort}`;
+        return { text: `Claude-Mem worker unreachable at port ${workerPort}` };
       }
 
       try {
         const health = JSON.parse(healthText);
-        return [
+        return { text: [
           "Claude-Mem Worker Status",
           `Status: ${health.status || "unknown"}`,
           `Port: ${workerPort}`,
           `Active sessions: ${sessionIds.size}`,
           `Observation feed: ${connectionState}`,
-        ].join("\n");
+        ].join("\n") };
       } catch {
-        return `Claude-Mem worker responded but returned unexpected data`;
+        return { text: `Claude-Mem worker responded but returned unexpected data` };
       }
     },
   });

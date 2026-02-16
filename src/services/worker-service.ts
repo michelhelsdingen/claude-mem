@@ -16,7 +16,9 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { getWorkerPort, getWorkerHost, isRemoteMode } from '../shared/worker-utils.js';
 import { HOOK_TIMEOUTS } from '../shared/hook-constants.js';
 import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
+import { getAuthMethodDescription } from '../shared/EnvManager.js';
 import { logger } from '../utils/logger.js';
+import { ChromaServerManager } from './sync/ChromaServerManager.js';
 
 // Windows: avoid repeated spawn popups when startup fails (issue #921)
 const WINDOWS_SPAWN_COOLDOWN_MS = 2 * 60 * 1000;
@@ -163,12 +165,23 @@ export class WorkerService {
   // Route handlers
   private searchRoutes: SearchRoutes | null = null;
 
+  // Chroma server (local mode)
+  private chromaServer: ChromaServerManager | null = null;
+
   // Initialization tracking
   private initializationComplete: Promise<void>;
   private resolveInitialization!: () => void;
 
   // Orphan reaper cleanup function (Issue #737)
   private stopOrphanReaper: (() => void) | null = null;
+
+  // AI interaction tracking for health endpoint
+  private lastAiInteraction: {
+    timestamp: number;
+    success: boolean;
+    provider: string;
+    error?: string;
+  } | null = null;
 
   constructor() {
     // Initialize the promise that will resolve when background initialization completes
@@ -206,7 +219,24 @@ export class WorkerService {
       getInitializationComplete: () => this.initializationCompleteFlag,
       getMcpReady: () => this.mcpReady,
       onShutdown: () => this.shutdown(),
-      onRestart: () => this.shutdown()
+      onRestart: () => this.shutdown(),
+      workerPath: __filename,
+      getAiStatus: () => {
+        let provider = 'claude';
+        if (isOpenRouterSelected() && isOpenRouterAvailable()) provider = 'openrouter';
+        else if (isGeminiSelected() && isGeminiAvailable()) provider = 'gemini';
+        return {
+          provider,
+          authMethod: getAuthMethodDescription(),
+          lastInteraction: this.lastAiInteraction
+            ? {
+                timestamp: this.lastAiInteraction.timestamp,
+                success: this.lastAiInteraction.success,
+                ...(this.lastAiInteraction.error && { error: this.lastAiInteraction.error }),
+              }
+            : null,
+        };
+      },
     });
 
     // Register route handlers
@@ -339,8 +369,32 @@ export class WorkerService {
       const { ModeManager } = await import('./domain/ModeManager.js');
       const { SettingsDefaultsManager } = await import('../shared/SettingsDefaultsManager.js');
       const { USER_SETTINGS_PATH } = await import('../shared/paths.js');
+      const os = await import('os');
 
       const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
+
+      // Start Chroma server if in local mode
+      const chromaMode = settings.CLAUDE_MEM_CHROMA_MODE || 'local';
+      if (chromaMode === 'local') {
+        logger.info('SYSTEM', 'Starting local Chroma server...');
+        this.chromaServer = ChromaServerManager.getInstance({
+          dataDir: path.join(os.homedir(), '.claude-mem', 'vector-db'),
+          host: settings.CLAUDE_MEM_CHROMA_HOST || '127.0.0.1',
+          port: parseInt(settings.CLAUDE_MEM_CHROMA_PORT || '8000', 10)
+        });
+
+        const ready = await this.chromaServer.start(60000);
+
+        if (ready) {
+          logger.success('SYSTEM', 'Chroma server ready');
+        } else {
+          logger.warn('SYSTEM', 'Chroma server failed to start - vector search disabled');
+          this.chromaServer = null;
+        }
+      } else {
+        logger.info('SYSTEM', 'Chroma remote mode - skipping local server');
+      }
+
       const modeId = settings.CLAUDE_MEM_MODE;
       ModeManager.getInstance().loadMode(modeId);
       logger.info('SYSTEM', `Mode loaded: ${modeId}`);
@@ -399,29 +453,7 @@ export class WorkerService {
         }
         return activeIds;
       });
-      logger.info('SYSTEM', 'Started orphan reaper (runs every 60 seconds)');
-
-      // Chroma watchdog: check if chroma-mcp is responsive, restart if dead
-      if (settings.CLAUDE_MEM_CHROMA_DISABLED !== 'true') {
-        const CHROMA_CHECK_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
-        const chromaWatchdog = setInterval(async () => {
-          try {
-            const chromaSync = this.dbManager.getChromaSync();
-            if (chromaSync.isDisabled()) return;
-            if (!chromaSync.isConnected()) {
-              logger.warn('SYSTEM', 'Chroma watchdog: connection lost, attempting reconnect');
-              try {
-                await chromaSync.close();
-              } catch { /* ignore close errors */ }
-              // ChromaSync will reconnect on next use via ensureConnection()
-            }
-          } catch (error) {
-            logger.error('SYSTEM', 'Chroma watchdog error', {}, error as Error);
-          }
-        }, CHROMA_CHECK_INTERVAL_MS);
-        chromaWatchdog.unref();
-        logger.info('SYSTEM', 'Started chroma watchdog (runs every 5 minutes)');
-      }
+      logger.info('SYSTEM', 'Started orphan reaper (runs every 5 minutes)');
 
       // Auto-recover orphaned queues (fire-and-forget with error logging)
       this.processPendingQueues(50).then(result => {
@@ -481,6 +513,7 @@ export class WorkerService {
 
     // Track whether generator failed with an unrecoverable error to prevent infinite restart loops
     let hadUnrecoverableError = false;
+    let sessionFailed = false;
 
     logger.info('SYSTEM', `Starting generator (${source}) using ${providerName}`, { sessionId: sid });
 
@@ -495,9 +528,16 @@ export class WorkerService {
           'CLAUDE_CODE_PATH',
           'ENOENT',
           'spawn',
+          'Invalid API key',
         ];
         if (unrecoverablePatterns.some(pattern => errorMessage.includes(pattern))) {
           hadUnrecoverableError = true;
+          this.lastAiInteraction = {
+            timestamp: Date.now(),
+            success: false,
+            provider: providerName,
+            error: errorMessage,
+          };
           logger.error('SDK', 'Unrecoverable generator error - will NOT restart', {
             sessionId: session.sessionDbId,
             project: session.project,
@@ -534,10 +574,26 @@ export class WorkerService {
           project: session.project,
           provider: providerName
         }, error as Error);
+        sessionFailed = true;
+        this.lastAiInteraction = {
+          timestamp: Date.now(),
+          success: false,
+          provider: providerName,
+          error: errorMessage,
+        };
         throw error;
       })
       .finally(() => {
         session.generatorPromise = null;
+
+        // Record successful AI interaction if no error occurred
+        if (!sessionFailed && !hadUnrecoverableError) {
+          this.lastAiInteraction = {
+            timestamp: Date.now(),
+            success: true,
+            provider: providerName,
+          };
+        }
 
         // Do NOT restart after unrecoverable errors - prevents infinite loops
         if (hadUnrecoverableError) {
@@ -748,7 +804,8 @@ export class WorkerService {
       server: this.server.getHttpServer(),
       sessionManager: this.sessionManager,
       mcpClient: this.mcpClient,
-      dbManager: this.dbManager
+      dbManager: this.dbManager,
+      chromaServer: this.chromaServer || undefined
     });
   }
 

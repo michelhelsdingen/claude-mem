@@ -36,9 +36,6 @@ export interface SettingsDefaults {
   CLAUDE_MEM_PYTHON_VERSION: string;
   CLAUDE_CODE_PATH: string;
   CLAUDE_MEM_MODE: string;
-  CLAUDE_MEM_CHROMA_DISABLED: string;  // 'true' | 'false' - disable Chroma vector search
-  CLAUDE_MEM_REMOTE_MODE: string;  // 'true' | 'false' - skip local worker spawn, connect to remote worker
-  CLAUDE_MEM_PROJECT: string;  // Override project name (useful for remote clients where cwd doesn't match)
   // Token Economics
   CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: string;
   CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: string;
@@ -55,9 +52,23 @@ export interface SettingsDefaults {
   CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: string;
   CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: string;
   CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED: string;
+  // Process Management
+  CLAUDE_MEM_MAX_CONCURRENT_AGENTS: string;  // Max concurrent Claude SDK agent subprocesses (default: 2)
   // Exclusion Settings
   CLAUDE_MEM_EXCLUDED_PROJECTS: string;  // Comma-separated glob patterns for excluded project paths
   CLAUDE_MEM_FOLDER_MD_EXCLUDE: string;  // JSON array of folder paths to exclude from CLAUDE.md generation
+  // Remote Worker Configuration
+  CLAUDE_MEM_REMOTE_MODE: string;  // 'true' | 'false' - skip local worker spawn, connect to remote worker
+  CLAUDE_MEM_PROJECT: string;  // Override project name (useful for remote clients where cwd doesn't match)
+  // Chroma Vector Database Configuration
+  CLAUDE_MEM_CHROMA_MODE: string;      // 'local' | 'remote'
+  CLAUDE_MEM_CHROMA_HOST: string;
+  CLAUDE_MEM_CHROMA_PORT: string;
+  CLAUDE_MEM_CHROMA_SSL: string;
+  // Future cloud support
+  CLAUDE_MEM_CHROMA_API_KEY: string;
+  CLAUDE_MEM_CHROMA_TENANT: string;
+  CLAUDE_MEM_CHROMA_DATABASE: string;
 }
 
 export class SettingsDefaultsManager {
@@ -88,28 +99,39 @@ export class SettingsDefaultsManager {
     CLAUDE_MEM_PYTHON_VERSION: '3.13',
     CLAUDE_CODE_PATH: '', // Empty means auto-detect via 'which claude'
     CLAUDE_MEM_MODE: 'code', // Default mode profile
-    CLAUDE_MEM_CHROMA_DISABLED: 'false',  // Chroma enabled by default
-    CLAUDE_MEM_REMOTE_MODE: 'false',  // Local mode by default
-    CLAUDE_MEM_PROJECT: '',  // Empty means use cwd-based project name
     // Token Economics
-    CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: 'true',
-    CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: 'true',
-    CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT: 'true',
+    CLAUDE_MEM_CONTEXT_SHOW_READ_TOKENS: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_WORK_TOKENS: 'false',
+    CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_AMOUNT: 'false',
     CLAUDE_MEM_CONTEXT_SHOW_SAVINGS_PERCENT: 'true',
     // Observation Filtering
     CLAUDE_MEM_CONTEXT_OBSERVATION_TYPES: DEFAULT_OBSERVATION_TYPES_STRING,
     CLAUDE_MEM_CONTEXT_OBSERVATION_CONCEPTS: DEFAULT_OBSERVATION_CONCEPTS_STRING,
     // Display Configuration
-    CLAUDE_MEM_CONTEXT_FULL_COUNT: '5',
+    CLAUDE_MEM_CONTEXT_FULL_COUNT: '0',
     CLAUDE_MEM_CONTEXT_FULL_FIELD: 'narrative',
     CLAUDE_MEM_CONTEXT_SESSION_COUNT: '10',
     // Feature Toggles
     CLAUDE_MEM_CONTEXT_SHOW_LAST_SUMMARY: 'true',
     CLAUDE_MEM_CONTEXT_SHOW_LAST_MESSAGE: 'false',
     CLAUDE_MEM_FOLDER_CLAUDEMD_ENABLED: 'false',
+    // Process Management
+    CLAUDE_MEM_MAX_CONCURRENT_AGENTS: '2',  // Max concurrent Claude SDK agent subprocesses
     // Exclusion Settings
     CLAUDE_MEM_EXCLUDED_PROJECTS: '',  // Comma-separated glob patterns for excluded project paths
     CLAUDE_MEM_FOLDER_MD_EXCLUDE: '[]',  // JSON array of folder paths to exclude from CLAUDE.md generation
+    // Remote Worker Configuration
+    CLAUDE_MEM_REMOTE_MODE: 'false',  // Local mode by default
+    CLAUDE_MEM_PROJECT: '',  // Empty means use cwd-based project name
+    // Chroma Vector Database Configuration
+    CLAUDE_MEM_CHROMA_MODE: 'local',           // 'local' starts npx chroma run, 'remote' connects to existing server
+    CLAUDE_MEM_CHROMA_HOST: '127.0.0.1',
+    CLAUDE_MEM_CHROMA_PORT: '8000',
+    CLAUDE_MEM_CHROMA_SSL: 'false',
+    // Future cloud support (claude-mem pro)
+    CLAUDE_MEM_CHROMA_API_KEY: '',
+    CLAUDE_MEM_CHROMA_TENANT: 'default_tenant',
+    CLAUDE_MEM_CHROMA_DATABASE: 'default_database',
   };
 
   /**
