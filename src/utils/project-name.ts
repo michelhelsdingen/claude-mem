@@ -1,30 +1,15 @@
 import path from 'path';
-import { join } from 'path';
-import { homedir } from 'os';
 import { logger } from './logger.js';
 import { detectWorktree } from './worktree.js';
-import { SettingsDefaultsManager } from '../shared/SettingsDefaultsManager.js';
 
 /**
  * Extract project name from working directory path
- * Checks CLAUDE_MEM_PROJECT setting first for override (useful for remote clients)
  * Handles edge cases: null/undefined cwd, drive roots, trailing slashes
  *
  * @param cwd - Current working directory (absolute path)
  * @returns Project name or "unknown-project" if extraction fails
  */
 export function getProjectName(cwd: string | null | undefined): string {
-  // Check for project name override from settings
-  try {
-    const settingsPath = join(SettingsDefaultsManager.get('CLAUDE_MEM_DATA_DIR'), 'settings.json');
-    const settings = SettingsDefaultsManager.loadFromFile(settingsPath);
-    if (settings.CLAUDE_MEM_PROJECT && settings.CLAUDE_MEM_PROJECT.trim() !== '') {
-      return settings.CLAUDE_MEM_PROJECT.trim();
-    }
-  } catch {
-    // Settings not available, fall through to cwd-based detection
-  }
-
   if (!cwd || cwd.trim() === '') {
     logger.warn('PROJECT_NAME', 'Empty cwd provided, using fallback', { cwd });
     return 'unknown-project';

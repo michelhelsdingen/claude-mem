@@ -10,7 +10,7 @@
  */
 
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, getWorkerPort } from '../../shared/worker-utils.js';
+import { ensureWorkerRunning, getWorkerBaseUrl } from '../../shared/worker-utils.js';
 import { logger } from '../../utils/logger.js';
 
 export const sessionCompleteHandler: EventHandler = {
@@ -23,7 +23,7 @@ export const sessionCompleteHandler: EventHandler = {
     }
 
     const { sessionId } = input;
-    const port = getWorkerPort();
+    const baseUrl = getWorkerBaseUrl();
 
     if (!sessionId) {
       logger.warn('HOOK', 'session-complete: Missing sessionId, skipping');
@@ -31,13 +31,13 @@ export const sessionCompleteHandler: EventHandler = {
     }
 
     logger.info('HOOK', '→ session-complete: Removing session from active map', {
-      workerPort: port,
+      workerUrl: baseUrl,
       contentSessionId: sessionId
     });
 
     try {
       // Call the session complete endpoint by contentSessionId
-      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/complete`, {
+      const response = await fetch(`${baseUrl}/api/sessions/complete`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

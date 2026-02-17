@@ -48,7 +48,6 @@ export class SessionStore {
     this.repairSessionIdColumnRename();
     this.addFailedAtEpochColumn();
     this.addOnUpdateCascadeToForeignKeys();
-    this.addPendingMessagesCompositeIndex();
   }
 
   /**
@@ -827,21 +826,6 @@ export class SessionStore {
   }
 
   /**
-   * Add composite index for pending_messages queue queries (migration 22)
-   * claimAndDelete() queries WHERE session_db_id = ? AND status = 'pending' ORDER BY id ASC
-   * This composite index covers that query pattern efficiently.
-   */
-  private addPendingMessagesCompositeIndex(): void {
-    const applied = this.db.prepare('SELECT version FROM schema_versions WHERE version = ?').get(22) as SchemaVersion | undefined;
-    if (applied) return;
-
-    this.db.run('CREATE INDEX IF NOT EXISTS idx_pending_messages_session_status_id ON pending_messages(session_db_id, status, id)');
-
-    this.db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at) VALUES (?, ?)').run(22, new Date().toISOString());
-    logger.debug('DB', 'Added composite index for pending_messages queue queries');
-  }
-
-  /**
    * Update the memory session ID for a session
    * Called by SDKAgent when it captures the session ID from the first SDK message
    * Also used to RESET to null on stale resume failures (worker-service.ts)
@@ -1436,20 +1420,6 @@ export class SessionStore {
 
     const result = stmt.run(contentSessionId, promptNumber, promptText, now.toISOString(), nowEpoch);
     return result.lastInsertRowid as number;
-  }
-
-  /**
-   * Check if a prompt with the same text was recently saved for this session.
-   * Used to deduplicate when hooks fire multiple times for the same prompt.
-   */
-  findRecentPrompt(contentSessionId: string, promptText: string, windowMs: number = 10000): { prompt_number: number } | null {
-    const cutoff = Date.now() - windowMs;
-    const stmt = this.db.prepare(`
-      SELECT prompt_number FROM user_prompts
-      WHERE content_session_id = ? AND prompt_text = ? AND created_at_epoch > ?
-      ORDER BY id DESC LIMIT 1
-    `);
-    return (stmt.get(contentSessionId, promptText, cutoff) as { prompt_number: number } | undefined) ?? null;
   }
 
   /**

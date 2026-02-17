@@ -7,7 +7,7 @@
 
 import { basename } from 'path';
 import type { EventHandler, NormalizedHookInput, HookResult } from '../types.js';
-import { ensureWorkerRunning, getWorkerBaseUrl } from '../../shared/worker-utils.js';
+import { ensureWorkerRunning, getWorkerBaseUrl, getWorkerPort } from '../../shared/worker-utils.js';
 import { HOOK_EXIT_CODES } from '../../shared/hook-constants.js';
 
 export const userMessageHandler: EventHandler = {
@@ -46,13 +46,12 @@ export const userMessageHandler: EventHandler = {
         output +
         "\n\n" + String.fromCodePoint(0x1F4A1) + " Wrap any message with <private> ... </private> to prevent storing sensitive information.\n" +
         "\n" + String.fromCodePoint(0x1F4AC) + " Community https://discord.gg/J4wttp9vDu" +
-        `\n` + String.fromCodePoint(0x1F4FA) + ` Watch live in browser ${baseUrl}/\n`
+        `\n` + String.fromCodePoint(0x1F4FA) + ` Watch live in browser http://localhost:${getWorkerPort()}/\n`
       );
     } catch (error) {
       // Worker unreachable — skip user message gracefully
       // User message context error is non-critical — skip gracefully
     }
-
 
     return { exitCode: HOOK_EXIT_CODES.SUCCESS };
   }

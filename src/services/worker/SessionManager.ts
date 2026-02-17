@@ -447,6 +447,7 @@ export class SessionManager {
       signal: session.abortController.signal,
       onIdleTimeout: () => {
         logger.info('SESSION', 'Triggering abort due to idle timeout to kill subprocess', { sessionDbId });
+        session.idleTimedOut = true;
         session.abortController.abort();
       }
     })) {

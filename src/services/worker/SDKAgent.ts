@@ -27,6 +27,8 @@ import { createPidCapturingSpawn, getProcessBySession, ensureProcessExit, waitFo
 // @ts-ignore - Agent SDK types may not be available
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+// Maximum conversation history entries to keep (prevents "Prompt is too long" errors)
+// Haiku has smaller context than Opus/Sonnet, so we keep this conservative
 const MAX_HISTORY_LENGTH = 20;
 
 export class SDKAgent {
@@ -434,28 +436,26 @@ export class SDKAgent {
   }
 
   // ============================================================================
-  // Configuration Helpers
+  // History Management
   // ============================================================================
 
   /**
-   * Add a message to conversation history with sliding window truncation.
+   * Add message to conversation history with sliding window truncation.
    * Keeps only the most recent MAX_HISTORY_LENGTH messages to prevent
    * "Prompt is too long" errors for long-running sessions.
    */
   private addToHistory(session: ActiveSession, message: { role: string; content: string }): void {
     session.conversationHistory.push(message);
-
-    // Truncate from beginning if we exceed max length (keep most recent)
     if (session.conversationHistory.length > MAX_HISTORY_LENGTH) {
-      const removed = session.conversationHistory.length - MAX_HISTORY_LENGTH;
-      session.conversationHistory = session.conversationHistory.slice(-MAX_HISTORY_LENGTH);
-      logger.debug('SDK', `Truncated conversation history`, {
-        sessionDbId: session.sessionDbId,
-        removed,
-        remaining: session.conversationHistory.length
-      });
+      const excess = session.conversationHistory.length - MAX_HISTORY_LENGTH;
+      session.conversationHistory.splice(0, excess);
+      logger.debug('AGENT', `Truncated conversation history: removed ${excess} oldest messages, keeping ${MAX_HISTORY_LENGTH}`);
     }
   }
+
+  // ============================================================================
+  // Configuration Helpers
+  // ============================================================================
 
   /**
    * Find Claude executable (inline, called once per session)
