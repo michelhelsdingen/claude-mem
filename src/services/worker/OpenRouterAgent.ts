@@ -144,108 +144,132 @@ export class OpenRouterAgent {
       let lastCwd: string | undefined;
 
       // Process pending messages
-      for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
-        // CLAIM-CONFIRM: Track message ID for confirmProcessed() after successful storage
-        // The message is now in 'processing' status in DB until ResponseProcessor calls confirmProcessed()
-        session.processingMessageIds.push(message._persistentId);
+      // CRITICAL: Wrap in try/finally to cleanup abandoned processingMessageIds on crash/abort.
+      // If the loop crashes after pushing IDs to processingMessageIds but before
+      // processAgentResponse confirmed them, the finally block marks them as failed.
+      try {
+        for await (const message of this.sessionManager.getMessageIterator(session.sessionDbId)) {
+          // CLAIM-CONFIRM: Track message ID for confirmProcessed() after successful storage
+          // The message is now in 'processing' status in DB until ResponseProcessor calls confirmProcessed()
+          session.processingMessageIds.push(message._persistentId);
 
-        // Capture cwd from messages for proper worktree support
-        if (message.cwd) {
-          lastCwd = message.cwd;
+          // Capture cwd from messages for proper worktree support
+          if (message.cwd) {
+            lastCwd = message.cwd;
+          }
+          // Capture earliest timestamp BEFORE processing (will be cleared after)
+          const originalTimestamp = session.earliestPendingTimestamp;
+
+          if (message.type === 'observation') {
+            // Update last prompt number
+            if (message.prompt_number !== undefined) {
+              session.lastPromptNumber = message.prompt_number;
+            }
+
+            // CRITICAL: Check memorySessionId BEFORE making expensive LLM call
+            // This prevents wasting tokens when we won't be able to store the result anyway
+            if (!session.memorySessionId) {
+              throw new Error('Cannot process observations: memorySessionId not yet captured. This session may need to be reinitialized.');
+            }
+
+            // Build observation prompt
+            const obsPrompt = buildObservationPrompt({
+              id: 0,
+              tool_name: message.tool_name!,
+              tool_input: JSON.stringify(message.tool_input),
+              tool_output: JSON.stringify(message.tool_response),
+              created_at_epoch: originalTimestamp ?? Date.now(),
+              cwd: message.cwd
+            });
+
+            // Add to conversation history and query OpenRouter with full context
+            session.conversationHistory.push({ role: 'user', content: obsPrompt });
+            const obsResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+
+            let tokensUsed = 0;
+            if (obsResponse.content) {
+              // Add response to conversation history
+              // session.conversationHistory.push({ role: 'assistant', content: obsResponse.content });
+
+              tokensUsed = obsResponse.tokensUsed || 0;
+              session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
+              session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
+            }
+
+            // Process response using shared ResponseProcessor
+            await processAgentResponse(
+              obsResponse.content || '',
+              session,
+              this.dbManager,
+              this.sessionManager,
+              worker,
+              tokensUsed,
+              originalTimestamp,
+              'OpenRouter',
+              lastCwd
+            );
+
+          } else if (message.type === 'summarize') {
+            // CRITICAL: Check memorySessionId BEFORE making expensive LLM call
+            if (!session.memorySessionId) {
+              throw new Error('Cannot process summary: memorySessionId not yet captured. This session may need to be reinitialized.');
+            }
+
+            // Build summary prompt
+            const summaryPrompt = buildSummaryPrompt({
+              id: session.sessionDbId,
+              memory_session_id: session.memorySessionId,
+              project: session.project,
+              user_prompt: session.userPrompt,
+              last_assistant_message: message.last_assistant_message || ''
+            }, mode);
+
+            // Add to conversation history and query OpenRouter with full context
+            session.conversationHistory.push({ role: 'user', content: summaryPrompt });
+            const summaryResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
+
+            let tokensUsed = 0;
+            if (summaryResponse.content) {
+              // Add response to conversation history
+              // session.conversationHistory.push({ role: 'assistant', content: summaryResponse.content });
+
+              tokensUsed = summaryResponse.tokensUsed || 0;
+              session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
+              session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
+            }
+
+            // Process response using shared ResponseProcessor
+            await processAgentResponse(
+              summaryResponse.content || '',
+              session,
+              this.dbManager,
+              this.sessionManager,
+              worker,
+              tokensUsed,
+              originalTimestamp,
+              'OpenRouter',
+              lastCwd
+            );
+          }
         }
-        // Capture earliest timestamp BEFORE processing (will be cleared after)
-        const originalTimestamp = session.earliestPendingTimestamp;
-
-        if (message.type === 'observation') {
-          // Update last prompt number
-          if (message.prompt_number !== undefined) {
-            session.lastPromptNumber = message.prompt_number;
-          }
-
-          // CRITICAL: Check memorySessionId BEFORE making expensive LLM call
-          // This prevents wasting tokens when we won't be able to store the result anyway
-          if (!session.memorySessionId) {
-            throw new Error('Cannot process observations: memorySessionId not yet captured. This session may need to be reinitialized.');
-          }
-
-          // Build observation prompt
-          const obsPrompt = buildObservationPrompt({
-            id: 0,
-            tool_name: message.tool_name!,
-            tool_input: JSON.stringify(message.tool_input),
-            tool_output: JSON.stringify(message.tool_response),
-            created_at_epoch: originalTimestamp ?? Date.now(),
-            cwd: message.cwd
+      } finally {
+        // Cleanup any abandoned processingMessageIds (crash/abort recovery)
+        // If processAgentResponse was never called or threw before clearing these,
+        // the messages would be stuck in 'processing' indefinitely without this cleanup.
+        if (session.processingMessageIds.length > 0) {
+          logger.warn('SDK', `Cleaning up ${session.processingMessageIds.length} abandoned processing messages`, {
+            sessionId: session.sessionDbId,
+            messageIds: session.processingMessageIds
           });
-
-          // Add to conversation history and query OpenRouter with full context
-          session.conversationHistory.push({ role: 'user', content: obsPrompt });
-          const obsResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
-
-          let tokensUsed = 0;
-          if (obsResponse.content) {
-            // Add response to conversation history
-            // session.conversationHistory.push({ role: 'assistant', content: obsResponse.content });
-
-            tokensUsed = obsResponse.tokensUsed || 0;
-            session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
-            session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
+          const pendingStore = this.sessionManager.getPendingMessageStore();
+          for (const messageId of session.processingMessageIds) {
+            try {
+              pendingStore.markFailed(messageId);
+            } catch (err) {
+              logger.error('SDK', `Failed to markFailed abandoned messageId=${messageId}`, {}, err as Error);
+            }
           }
-
-          // Process response using shared ResponseProcessor
-          await processAgentResponse(
-            obsResponse.content || '',
-            session,
-            this.dbManager,
-            this.sessionManager,
-            worker,
-            tokensUsed,
-            originalTimestamp,
-            'OpenRouter',
-            lastCwd
-          );
-
-        } else if (message.type === 'summarize') {
-          // CRITICAL: Check memorySessionId BEFORE making expensive LLM call
-          if (!session.memorySessionId) {
-            throw new Error('Cannot process summary: memorySessionId not yet captured. This session may need to be reinitialized.');
-          }
-
-          // Build summary prompt
-          const summaryPrompt = buildSummaryPrompt({
-            id: session.sessionDbId,
-            memory_session_id: session.memorySessionId,
-            project: session.project,
-            user_prompt: session.userPrompt,
-            last_assistant_message: message.last_assistant_message || ''
-          }, mode);
-
-          // Add to conversation history and query OpenRouter with full context
-          session.conversationHistory.push({ role: 'user', content: summaryPrompt });
-          const summaryResponse = await this.queryOpenRouterMultiTurn(session.conversationHistory, apiKey, model, siteUrl, appName);
-
-          let tokensUsed = 0;
-          if (summaryResponse.content) {
-            // Add response to conversation history
-            // session.conversationHistory.push({ role: 'assistant', content: summaryResponse.content });
-
-            tokensUsed = summaryResponse.tokensUsed || 0;
-            session.cumulativeInputTokens += Math.floor(tokensUsed * 0.7);
-            session.cumulativeOutputTokens += Math.floor(tokensUsed * 0.3);
-          }
-
-          // Process response using shared ResponseProcessor
-          await processAgentResponse(
-            summaryResponse.content || '',
-            session,
-            this.dbManager,
-            this.sessionManager,
-            worker,
-            tokensUsed,
-            originalTimestamp,
-            'OpenRouter',
-            lastCwd
-          );
+          session.processingMessageIds = [];
         }
       }
 
